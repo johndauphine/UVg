@@ -10,16 +10,6 @@ pub fn table_to_variable_name(table_name: &str) -> String {
     format!("t_{table_name}")
 }
 
-/// Derive a relationship attribute name from a foreign key column name.
-/// Strips the `_id` suffix if present (e.g. "user_id" -> "user").
-#[allow(dead_code)]
-pub fn fk_column_to_relationship_name(column_name: &str) -> String {
-    column_name
-        .strip_suffix("_id")
-        .unwrap_or(column_name)
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,9 +28,4 @@ mod tests {
         assert_eq!(table_to_variable_name("order_items"), "t_order_items");
     }
 
-    #[test]
-    fn test_fk_column_to_relationship_name() {
-        assert_eq!(fk_column_to_relationship_name("user_id"), "user");
-        assert_eq!(fk_column_to_relationship_name("category"), "category");
-    }
 }

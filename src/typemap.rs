@@ -131,22 +131,12 @@ fn simple(sa_type: &str, python_type: &str, import_module: &str) -> MappedType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::test_column;
 
     fn col(udt_name: &str) -> ColumnInfo {
         ColumnInfo {
-            name: "test".to_string(),
-            ordinal_position: 1,
-            is_nullable: false,
-            data_type: String::new(),
             udt_name: udt_name.to_string(),
-            character_maximum_length: None,
-            numeric_precision: None,
-            numeric_scale: None,
-            column_default: None,
-            is_identity: false,
-            identity_generation: None,
-            identity: None,
-            comment: None,
+            ..test_column("test")
         }
     }
 

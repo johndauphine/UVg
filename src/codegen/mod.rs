@@ -90,6 +90,34 @@ pub fn get_foreign_key_for_column<'a>(
     })
 }
 
+/// Check if an index is just backing a unique constraint (same columns).
+pub fn is_unique_constraint_index(
+    index: &crate::schema::IndexInfo,
+    constraints: &[crate::schema::ConstraintInfo],
+) -> bool {
+    if !index.is_unique {
+        return false;
+    }
+    constraints
+        .iter()
+        .any(|c| c.constraint_type == crate::schema::ConstraintType::Unique && c.columns == index.columns)
+}
+
+/// Quote a list of column names for use in constraint arguments.
+pub fn quote_constraint_columns(cols: &[String]) -> Vec<String> {
+    cols.iter().map(|c| format!("'{c}'")).collect()
+}
+
+/// Escape single quotes in a string for Python string literals.
+pub fn escape_python_string(s: &str) -> String {
+    s.replace('\'', "\\'")
+}
+
+/// Check if a column default is a serial/sequence default (nextval).
+pub fn is_serial_default(default: &str) -> bool {
+    default.starts_with("nextval(")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,5 @@
 use clap::Parser;
+use crate::schema::DEFAULT_SCHEMA;
 
 /// Generate SQLAlchemy model code from an existing database.
 ///
@@ -18,14 +19,14 @@ pub struct Cli {
     pub tables: Option<String>,
 
     /// Schemas to load (comma-delimited)
-    #[arg(long, default_value = "public")]
+    #[arg(long, default_value = DEFAULT_SCHEMA)]
     pub schemas: String,
 
     /// Ignore views
     #[arg(long)]
     pub noviews: bool,
 
-    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments, use_inflect, nojoined, nobidi
+    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments
     #[arg(long)]
     pub options: Option<String>,
 
@@ -39,9 +40,6 @@ pub struct GeneratorOptions {
     pub noindexes: bool,
     pub noconstraints: bool,
     pub nocomments: bool,
-    pub use_inflect: bool,
-    pub nojoined: bool,
-    pub nobidi: bool,
 }
 
 impl Cli {
@@ -70,9 +68,6 @@ impl Cli {
                     "noindexes" => opts.noindexes = true,
                     "noconstraints" => opts.noconstraints = true,
                     "nocomments" => opts.nocomments = true,
-                    "use_inflect" => opts.use_inflect = true,
-                    "nojoined" => opts.nojoined = true,
-                    "nobidi" => opts.nobidi = true,
                     _ => tracing::warn!("Unknown generator option: {}", opt),
                 }
             }

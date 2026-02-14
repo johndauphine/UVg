@@ -1,3 +1,5 @@
+pub const DEFAULT_SCHEMA: &str = "public";
+
 /// Represents an introspected database schema containing all tables and their metadata.
 #[derive(Debug, Clone)]
 pub struct IntrospectedSchema {

@@ -1,11 +1,12 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
-    format_server_default, get_foreign_key_for_column, has_unique_constraint,
-    is_primary_key_column, Generator,
+    escape_python_string, format_server_default, get_foreign_key_for_column, has_unique_constraint,
+    is_primary_key_column, is_serial_default, is_unique_constraint_index,
+    quote_constraint_columns, Generator,
 };
 use crate::naming::table_to_variable_name;
-use crate::schema::{ConstraintType, IndexInfo, IntrospectedSchema, TableInfo};
+use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo, DEFAULT_SCHEMA};
 use crate::typemap::map_column_type;
 
 pub struct TablesGenerator;
@@ -99,7 +100,7 @@ fn generate_table(
         // Server default
         if let Some(ref default) = col.column_default {
             // Skip nextval defaults (auto-generated for serial columns)
-            if !default.starts_with("nextval(") {
+            if !is_serial_default(default) {
                 imports.add("sqlalchemy", "text");
                 let formatted = format_server_default(default);
                 col_args.push(format!("server_default={formatted}"));
@@ -109,7 +110,7 @@ fn generate_table(
         // Comment
         if !options.nocomments {
             if let Some(ref comment) = col.comment {
-                col_args.push(format!("comment='{}'", comment.replace('\'', "\\'")));
+                col_args.push(format!("comment='{}'", escape_python_string(comment)));
             }
         }
 
@@ -122,11 +123,7 @@ fn generate_table(
             if constraint.constraint_type == ConstraintType::Unique && constraint.columns.len() > 1
             {
                 imports.add("sqlalchemy", "UniqueConstraint");
-                let cols: Vec<String> = constraint
-                    .columns
-                    .iter()
-                    .map(|c| format!("'{c}'"))
-                    .collect();
+                let cols = quote_constraint_columns(&constraint.columns);
                 lines.push(format!("    UniqueConstraint({}),", cols.join(", ")));
             }
         }
@@ -140,7 +137,7 @@ fn generate_table(
                 continue;
             }
             imports.add("sqlalchemy", "Index");
-            let cols: Vec<String> = index.columns.iter().map(|c| format!("'{c}'")).collect();
+            let cols = quote_constraint_columns(&index.columns);
             let unique_str = if index.is_unique { ", unique=True" } else { "" };
             lines.push(format!(
                 "    Index('{}', {}{}),",
@@ -156,11 +153,7 @@ fn generate_table(
         for constraint in &table.constraints {
             if constraint.constraint_type == ConstraintType::PrimaryKey {
                 imports.add("sqlalchemy", "PrimaryKeyConstraint");
-                let cols: Vec<String> = constraint
-                    .columns
-                    .iter()
-                    .map(|c| format!("'{c}'"))
-                    .collect();
+                let cols = quote_constraint_columns(&constraint.columns);
                 lines.push(format!(
                     "    PrimaryKeyConstraint({}, name='{}')",
                     cols.join(", "),
@@ -170,8 +163,8 @@ fn generate_table(
         }
     }
 
-    // Schema (only if not 'public')
-    if table.schema != "public" {
+    // Schema (only if not default)
+    if table.schema != DEFAULT_SCHEMA {
         lines.push(format!("    schema='{}'", table.schema));
     }
     lines.push(")".to_string());
@@ -179,23 +172,11 @@ fn generate_table(
     lines.join("\n")
 }
 
-/// Check if an index is just backing a unique constraint (same columns).
-fn is_unique_constraint_index(
-    index: &IndexInfo,
-    constraints: &[crate::schema::ConstraintInfo],
-) -> bool {
-    if !index.is_unique {
-        return false;
-    }
-    constraints
-        .iter()
-        .any(|c| c.constraint_type == ConstraintType::Unique && c.columns == index.columns)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::*;
+    use crate::testutil::test_column;
 
     fn make_simple_schema() -> IntrospectedSchema {
         IntrospectedSchema {
@@ -205,50 +186,16 @@ mod tests {
                 table_type: TableType::Table,
                 comment: None,
                 columns: vec![
+                    test_column("id"),
                     ColumnInfo {
-                        name: "id".to_string(),
-                        ordinal_position: 1,
-                        is_nullable: false,
-                        data_type: "integer".to_string(),
-                        udt_name: "int4".to_string(),
-                        character_maximum_length: None,
-                        numeric_precision: None,
-                        numeric_scale: None,
-                        column_default: None,
-                        is_identity: false,
-                        identity_generation: None,
-                        identity: None,
-                        comment: None,
-                    },
-                    ColumnInfo {
-                        name: "name".to_string(),
-                        ordinal_position: 2,
-                        is_nullable: false,
-                        data_type: "character varying".to_string(),
                         udt_name: "varchar".to_string(),
                         character_maximum_length: Some(100),
-                        numeric_precision: None,
-                        numeric_scale: None,
-                        column_default: None,
-                        is_identity: false,
-                        identity_generation: None,
-                        identity: None,
-                        comment: None,
+                        ..test_column("name")
                     },
                     ColumnInfo {
-                        name: "email".to_string(),
-                        ordinal_position: 3,
                         is_nullable: true,
-                        data_type: "text".to_string(),
                         udt_name: "text".to_string(),
-                        character_maximum_length: None,
-                        numeric_precision: None,
-                        numeric_scale: None,
-                        column_default: None,
-                        is_identity: false,
-                        identity_generation: None,
-                        identity: None,
-                        comment: None,
+                        ..test_column("email")
                     },
                 ],
                 constraints: vec![ConstraintInfo {

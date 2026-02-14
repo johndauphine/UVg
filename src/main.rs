@@ -4,6 +4,8 @@ mod error;
 mod introspect;
 mod naming;
 mod schema;
+#[cfg(test)]
+mod testutil;
 mod typemap;
 
 use std::fs;

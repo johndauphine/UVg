@@ -1,11 +1,12 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
-    format_server_default, get_foreign_key_for_column, has_unique_constraint,
-    is_primary_key_column, Generator,
+    escape_python_string, format_server_default, get_foreign_key_for_column, has_unique_constraint,
+    is_primary_key_column, is_serial_default, is_unique_constraint_index,
+    quote_constraint_columns, Generator,
 };
 use crate::naming::table_to_class_name;
-use crate::schema::{ConstraintType, IndexInfo, IntrospectedSchema, TableInfo};
+use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo, DEFAULT_SCHEMA};
 use crate::typemap::map_column_type;
 
 pub struct DeclarativeGenerator;
@@ -180,7 +181,7 @@ fn generate_class(
 
         // Server default
         if let Some(ref default) = col.column_default {
-            if !default.starts_with("nextval(") {
+            if !is_serial_default(default) {
                 imports.add("sqlalchemy", "text");
                 let formatted = format_server_default(default);
                 mc_args.push(format!("server_default={formatted}"));
@@ -190,7 +191,7 @@ fn generate_class(
         // Comment
         if !options.nocomments {
             if let Some(ref comment) = col.comment {
-                mc_args.push(format!("comment='{}'", comment.replace('\'', "\\'")));
+                mc_args.push(format!("comment='{}'", escape_python_string(comment)));
             }
         }
 
@@ -236,11 +237,7 @@ fn build_table_args(
         for constraint in &table.constraints {
             if constraint.constraint_type == ConstraintType::PrimaryKey {
                 imports.add("sqlalchemy", "PrimaryKeyConstraint");
-                let cols: Vec<String> = constraint
-                    .columns
-                    .iter()
-                    .map(|c| format!("'{c}'"))
-                    .collect();
+                let cols = quote_constraint_columns(&constraint.columns);
                 args.push(format!(
                     "PrimaryKeyConstraint({}, name='{}')",
                     cols.join(", "),
@@ -256,11 +253,7 @@ fn build_table_args(
             if constraint.constraint_type == ConstraintType::Unique && constraint.columns.len() > 1
             {
                 imports.add("sqlalchemy", "UniqueConstraint");
-                let cols: Vec<String> = constraint
-                    .columns
-                    .iter()
-                    .map(|c| format!("'{c}'"))
-                    .collect();
+                let cols = quote_constraint_columns(&constraint.columns);
                 args.push(format!("UniqueConstraint({})", cols.join(", ")));
             }
         }
@@ -273,7 +266,7 @@ fn build_table_args(
                 continue;
             }
             imports.add("sqlalchemy", "Index");
-            let cols: Vec<String> = index.columns.iter().map(|c| format!("'{c}'")).collect();
+            let cols = quote_constraint_columns(&index.columns);
             let unique_str = if index.is_unique { ", unique=True" } else { "" };
             args.push(format!(
                 "Index('{}', {}{})",
@@ -287,12 +280,12 @@ fn build_table_args(
     // Table comment
     if !options.nocomments {
         if let Some(ref comment) = table.comment {
-            args.push(format!("{{'comment': '{}'}}", comment.replace('\'', "\\'")));
+            args.push(format!("{{'comment': '{}'}}", escape_python_string(comment)));
         }
     }
 
-    // Schema (if not 'public')
-    if table.schema != "public" {
+    // Schema (if not default)
+    if table.schema != DEFAULT_SCHEMA {
         args.push(format!("{{'schema': '{}'}}", table.schema));
     }
 
@@ -304,22 +297,11 @@ fn build_table_args(
     }
 }
 
-fn is_unique_constraint_index(
-    index: &IndexInfo,
-    constraints: &[crate::schema::ConstraintInfo],
-) -> bool {
-    if !index.is_unique {
-        return false;
-    }
-    constraints
-        .iter()
-        .any(|c| c.constraint_type == ConstraintType::Unique && c.columns == index.columns)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::*;
+    use crate::testutil::test_column;
 
     fn make_simple_schema() -> IntrospectedSchema {
         IntrospectedSchema {
@@ -330,80 +312,27 @@ mod tests {
                     table_type: TableType::Table,
                     comment: None,
                     columns: vec![
+                        test_column("id"),
                         ColumnInfo {
-                            name: "id".to_string(),
-                            ordinal_position: 1,
-                            is_nullable: false,
-                            data_type: "integer".to_string(),
-                            udt_name: "int4".to_string(),
-                            character_maximum_length: None,
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
-                        },
-                        ColumnInfo {
-                            name: "name".to_string(),
-                            ordinal_position: 2,
-                            is_nullable: false,
-                            data_type: "character varying".to_string(),
                             udt_name: "varchar".to_string(),
                             character_maximum_length: Some(100),
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("name")
                         },
                         ColumnInfo {
-                            name: "email".to_string(),
-                            ordinal_position: 3,
-                            is_nullable: false,
-                            data_type: "character varying".to_string(),
                             udt_name: "varchar".to_string(),
                             character_maximum_length: Some(255),
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("email")
                         },
                         ColumnInfo {
-                            name: "bio".to_string(),
-                            ordinal_position: 4,
                             is_nullable: true,
-                            data_type: "text".to_string(),
                             udt_name: "text".to_string(),
-                            character_maximum_length: None,
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("bio")
                         },
                         ColumnInfo {
-                            name: "created_at".to_string(),
-                            ordinal_position: 5,
                             is_nullable: true,
-                            data_type: "timestamp with time zone".to_string(),
                             udt_name: "timestamptz".to_string(),
-                            character_maximum_length: None,
-                            numeric_precision: None,
-                            numeric_scale: None,
                             column_default: Some("now()".to_string()),
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("created_at")
                         },
                     ],
                     constraints: vec![
@@ -429,64 +358,18 @@ mod tests {
                     comment: None,
                     columns: vec![
                         ColumnInfo {
-                            name: "id".to_string(),
-                            ordinal_position: 1,
-                            is_nullable: false,
-                            data_type: "bigint".to_string(),
                             udt_name: "int8".to_string(),
-                            character_maximum_length: None,
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("id")
                         },
+                        test_column("user_id"),
                         ColumnInfo {
-                            name: "user_id".to_string(),
-                            ordinal_position: 2,
-                            is_nullable: false,
-                            data_type: "integer".to_string(),
-                            udt_name: "int4".to_string(),
-                            character_maximum_length: None,
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
-                        },
-                        ColumnInfo {
-                            name: "title".to_string(),
-                            ordinal_position: 3,
-                            is_nullable: false,
-                            data_type: "character varying".to_string(),
                             udt_name: "varchar".to_string(),
                             character_maximum_length: Some(200),
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("title")
                         },
                         ColumnInfo {
-                            name: "body".to_string(),
-                            ordinal_position: 4,
-                            is_nullable: false,
-                            data_type: "text".to_string(),
                             udt_name: "text".to_string(),
-                            character_maximum_length: None,
-                            numeric_precision: None,
-                            numeric_scale: None,
-                            column_default: None,
-                            is_identity: false,
-                            identity_generation: None,
-                            identity: None,
-                            comment: None,
+                            ..test_column("body")
                         },
                     ],
                     constraints: vec![
