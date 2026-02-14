@@ -54,11 +54,15 @@ pub async fn query_constraints(
                rc.update_rule, rc.delete_rule
         FROM information_schema.table_constraints tc
         JOIN information_schema.key_column_usage kcu
-            USING (constraint_name, table_schema, table_name)
+            ON kcu.constraint_name = tc.constraint_name
+            AND kcu.table_schema = tc.table_schema
+            AND kcu.table_name = tc.table_name
         JOIN information_schema.constraint_column_usage ccu
-            USING (constraint_name, constraint_schema)
+            ON ccu.constraint_name = tc.constraint_name
+            AND ccu.constraint_schema = tc.constraint_schema
         JOIN information_schema.referential_constraints rc
-            USING (constraint_name, constraint_schema)
+            ON rc.constraint_name = tc.constraint_name
+            AND rc.constraint_schema = tc.constraint_schema
         WHERE tc.table_schema = $1 AND tc.table_name = $2
             AND tc.constraint_type = 'FOREIGN KEY'
         ORDER BY tc.constraint_name, kcu.ordinal_position
