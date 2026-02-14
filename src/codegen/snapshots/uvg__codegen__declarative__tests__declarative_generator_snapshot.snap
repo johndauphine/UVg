@@ -1,0 +1,5 @@
+---
+source: src/codegen/declarative.rs
+expression: output
+---
+"from typing import Optional\n\nimport datetime\nfrom sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, text\nfrom sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column\n\n\nclass Base(DeclarativeBase):\n    pass\n\n\nclass Users(Base):\n    __tablename__ = 'users'\n\n    id: Mapped[int] = mapped_column(Integer, primary_key=True)\n    name: Mapped[str] = mapped_column(String(100))\n    email: Mapped[str] = mapped_column(String(255), unique=True)\n    bio: Mapped[Optional[str]] = mapped_column(Text)\n    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(timezone=True), server_default=text('now()'))\n\nclass Posts(Base):\n    __tablename__ = 'posts'\n\n    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)\n    user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'))\n    title: Mapped[str] = mapped_column(String(200))\n    body: Mapped[str] = mapped_column(Text)\n"

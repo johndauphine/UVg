@@ -1,0 +1,21 @@
+[package]
+name = "uvg"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "uvg"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+heck = "0.5"
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml"] }

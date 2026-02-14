@@ -1,0 +1,5 @@
+---
+source: src/codegen/tables.rs
+expression: output
+---
+"from sqlalchemy import Column, Integer, MetaData, String, Table, Text\n\nmetadata = MetaData()\n\nt_users = Table(\n    'users', metadata,\n    Column('id', Integer, primary_key=True),\n    Column('name', String(100), nullable=False),\n    Column('email', Text),\n    schema='public'\n)\n"
