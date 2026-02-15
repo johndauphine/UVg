@@ -1,19 +1,6 @@
 use crate::schema::ColumnInfo;
 
-/// The result of mapping a PostgreSQL type to its SQLAlchemy representation.
-#[derive(Debug, Clone)]
-pub struct MappedType {
-    /// The SQLAlchemy type expression (e.g. "Integer", "String(100)", "JSONB").
-    pub sa_type: String,
-    /// The Python type annotation for Mapped[] (e.g. "int", "str", "datetime.datetime").
-    pub python_type: String,
-    /// The module to import the type from (e.g. "sqlalchemy" or "sqlalchemy.dialects.postgresql").
-    pub import_module: String,
-    /// The type name to import (e.g. "Integer", "JSONB"). For parameterized types, just the base name.
-    pub import_name: String,
-    /// For ARRAY types, the element type import info.
-    pub element_import: Option<(String, String)>,
-}
+use super::{simple, MappedType};
 
 /// Map a PostgreSQL column to its SQLAlchemy type representation.
 pub fn map_column_type(col: &ColumnInfo) -> MappedType {
@@ -115,16 +102,6 @@ fn map_udt_scalar(udt: &str, col: &ColumnInfo) -> MappedType {
             import_name: other.to_uppercase(),
             element_import: None,
         },
-    }
-}
-
-fn simple(sa_type: &str, python_type: &str, import_module: &str) -> MappedType {
-    MappedType {
-        sa_type: sa_type.to_string(),
-        python_type: python_type.to_string(),
-        import_module: import_module.to_string(),
-        import_name: sa_type.to_string(),
-        element_import: None,
     }
 }
 

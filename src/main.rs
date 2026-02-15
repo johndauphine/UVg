@@ -1,5 +1,6 @@
 mod cli;
 mod codegen;
+mod dialect;
 mod error;
 mod introspect;
 mod naming;
@@ -15,7 +16,7 @@ use clap::Parser;
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, ConnectionConfig};
 use crate::codegen::declarative::DeclarativeGenerator;
 use crate::codegen::tables::TablesGenerator;
 use crate::codegen::Generator;
@@ -28,20 +29,54 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let conn_url = cli.connection_url()?;
-    let schemas = cli.schema_list();
+    let config = cli.parse_connection()?;
+    let dialect = config.dialect();
+    let schemas = cli.schema_list_or(dialect.default_schema());
     let table_filter = cli.table_list();
     let options = cli.generator_options();
 
     tracing::debug!("Connecting to database...");
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&conn_url)
-        .await?;
 
-    tracing::debug!("Introspecting schema...");
-    let schema =
-        introspect::introspect(&pool, &schemas, &table_filter, cli.noviews, &options).await?;
+    let schema = match config {
+        ConnectionConfig::Postgres(url) => {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await?;
+            tracing::debug!("Introspecting schema...");
+            let s = introspect::pg::introspect(
+                &pool,
+                &schemas,
+                &table_filter,
+                cli.noviews,
+                &options,
+            )
+            .await;
+            pool.close().await;
+            s?
+        }
+        ConnectionConfig::Mssql {
+            host,
+            port,
+            database,
+            user,
+            password,
+            trust_cert,
+        } => {
+            let mut client =
+                introspect::mssql::connect(&host, port, &database, &user, &password, trust_cert)
+                    .await?;
+            tracing::debug!("Introspecting schema...");
+            introspect::mssql::introspect(
+                &mut client,
+                &schemas,
+                &table_filter,
+                cli.noviews,
+                &options,
+            )
+            .await?
+        }
+    };
 
     tracing::debug!("Found {} tables/views", schema.tables.len());
 
@@ -69,6 +104,5 @@ async fn main() -> Result<()> {
         }
     }
 
-    pool.close().await;
     Ok(())
 }

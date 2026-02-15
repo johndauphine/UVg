@@ -49,6 +49,7 @@ pub async fn query_columns(
             identity_generation: row.identity_generation,
             identity,
             comment: row.comment,
+            collation: None,
         });
     }
 

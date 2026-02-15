@@ -17,5 +17,6 @@ pub fn test_column(name: &str) -> ColumnInfo {
         identity_generation: None,
         identity: None,
         comment: None,
+        collation: None,
     }
 }

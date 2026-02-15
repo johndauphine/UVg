@@ -3,6 +3,7 @@ pub mod imports;
 pub mod tables;
 
 use crate::cli::GeneratorOptions;
+use crate::dialect::Dialect;
 use crate::schema::IntrospectedSchema;
 
 /// Trait for code generators.
@@ -11,11 +12,12 @@ pub trait Generator {
 }
 
 /// Format a server_default expression. Wraps raw SQL in text('...').
-pub fn format_server_default(default: &str) -> String {
-    // Strip PostgreSQL type casts like ::integer, ::character varying, etc.
-    let cleaned = strip_pg_typecast(default);
+pub fn format_server_default(default: &str, dialect: Dialect) -> String {
+    let cleaned = match dialect {
+        Dialect::Postgres => strip_pg_typecast(default),
+        Dialect::Mssql => strip_mssql_parens(default),
+    };
 
-    // If it looks like a function call or expression, wrap in text()
     format!("text('{cleaned}')")
 }
 
@@ -53,6 +55,22 @@ fn find_typecast_pos(expr: &str) -> Option<usize> {
     }
 
     last_cast_pos
+}
+
+/// Strip MSSQL wrapping parentheses and leading N from string literals.
+/// e.g. "((0))" -> "0"
+/// e.g. "(N'hello')" -> "'hello'"
+fn strip_mssql_parens(expr: &str) -> &str {
+    let mut s = expr.trim();
+    // Strip outer parens: MSSQL defaults are often wrapped like ((value))
+    while s.starts_with('(') && s.ends_with(')') {
+        s = &s[1..s.len() - 1];
+    }
+    // Strip leading N from N'string' literals
+    if s.starts_with("N'") || s.starts_with("N\"") {
+        s = &s[1..];
+    }
+    s.trim()
 }
 
 /// Check if a column is part of the primary key.
@@ -113,9 +131,13 @@ pub fn escape_python_string(s: &str) -> String {
     s.replace('\'', "\\'")
 }
 
-/// Check if a column default is a serial/sequence default (nextval).
-pub fn is_serial_default(default: &str) -> bool {
-    default.starts_with("nextval(")
+/// Check if a column default is a serial/sequence default.
+/// PG: starts with `nextval(`; MSSQL: always false (identity columns have NULL defaults).
+pub fn is_serial_default(default: &str, dialect: Dialect) -> bool {
+    match dialect {
+        Dialect::Postgres => default.starts_with("nextval("),
+        Dialect::Mssql => false,
+    }
 }
 
 #[cfg(test)]
@@ -123,9 +145,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_server_default() {
-        assert_eq!(format_server_default("now()"), "text('now()')");
-        assert_eq!(format_server_default("0"), "text('0')");
+    fn test_format_server_default_pg() {
+        assert_eq!(
+            format_server_default("now()", Dialect::Postgres),
+            "text('now()')"
+        );
+        assert_eq!(
+            format_server_default("0", Dialect::Postgres),
+            "text('0')"
+        );
     }
 
     #[test]
@@ -137,5 +165,36 @@ mod tests {
             strip_pg_typecast("nextval('seq'::regclass)"),
             "nextval('seq'::regclass)"
         );
+    }
+
+    #[test]
+    fn test_format_server_default_mssql() {
+        assert_eq!(
+            format_server_default("((0))", Dialect::Mssql),
+            "text('0')"
+        );
+        assert_eq!(
+            format_server_default("(N'hello')", Dialect::Mssql),
+            "text(''hello'')"
+        );
+        assert_eq!(
+            format_server_default("(getdate())", Dialect::Mssql),
+            "text('getdate()')"
+        );
+    }
+
+    #[test]
+    fn test_strip_mssql_parens() {
+        assert_eq!(strip_mssql_parens("((0))"), "0");
+        assert_eq!(strip_mssql_parens("(N'hello')"), "'hello'");
+        assert_eq!(strip_mssql_parens("(getdate())"), "getdate()");
+        assert_eq!(strip_mssql_parens("((1))"), "1");
+    }
+
+    #[test]
+    fn test_is_serial_default() {
+        assert!(is_serial_default("nextval('seq'::regclass)", Dialect::Postgres));
+        assert!(!is_serial_default("nextval('seq')", Dialect::Mssql));
+        assert!(!is_serial_default("((1))", Dialect::Mssql));
     }
 }

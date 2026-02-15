@@ -5,8 +5,9 @@ use crate::codegen::{
     is_primary_key_column, is_serial_default, is_unique_constraint_index,
     quote_constraint_columns, Generator,
 };
+use crate::dialect::Dialect;
 use crate::naming::table_to_class_name;
-use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo, DEFAULT_SCHEMA};
+use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
 use crate::typemap::map_column_type;
 
 pub struct DeclarativeGenerator;
@@ -26,7 +27,7 @@ impl Generator for DeclarativeGenerator {
         imports.add("sqlalchemy.orm", "mapped_column");
 
         for table in &schema.tables {
-            let (block, meta) = generate_class(table, &mut imports, options);
+            let (block, meta) = generate_class(table, &mut imports, options, schema.dialect);
             if meta.needs_optional {
                 needs_optional = true;
             }
@@ -79,6 +80,7 @@ fn generate_class(
     table: &TableInfo,
     imports: &mut ImportCollector,
     options: &GeneratorOptions,
+    dialect: Dialect,
 ) -> (String, ClassMeta) {
     let class_name = table_to_class_name(&table.name);
     let mut lines: Vec<String> = Vec::new();
@@ -93,7 +95,7 @@ fn generate_class(
     lines.push(format!("    __tablename__ = '{}'", table.name));
 
     // Table-level args (multi-column unique constraints, indexes, comments, schema)
-    let table_args = build_table_args(table, imports, options);
+    let table_args = build_table_args(table, imports, options, dialect);
     if let Some(args_str) = table_args {
         lines.push(format!("    __table_args__ = (\n{args_str}\n    )"));
     }
@@ -110,7 +112,7 @@ fn generate_class(
     let mut col_lines: Vec<ColLine> = Vec::new();
 
     for col in &table.columns {
-        let mapped = map_column_type(col);
+        let mapped = map_column_type(col, dialect);
         imports.add(&mapped.import_module, &mapped.import_name);
         if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
             imports.add(elem_mod, elem_name);
@@ -155,13 +157,23 @@ fn generate_class(
             }
         }
 
-        // Identity
+        // Identity — dialect-aware output
         if let Some(ref identity) = col.identity {
             imports.add("sqlalchemy", "Identity");
-            mc_args.push(format!(
-                "Identity(start={}, increment={}, minvalue={}, maxvalue={}, cycle=False, cache={})",
-                identity.start, identity.increment, identity.min_value, identity.max_value, identity.cache
-            ));
+            match dialect {
+                Dialect::Postgres => {
+                    mc_args.push(format!(
+                        "Identity(start={}, increment={}, minvalue={}, maxvalue={}, cycle=False, cache={})",
+                        identity.start, identity.increment, identity.min_value, identity.max_value, identity.cache
+                    ));
+                }
+                Dialect::Mssql => {
+                    mc_args.push(format!(
+                        "Identity(start={}, increment={})",
+                        identity.start, identity.increment
+                    ));
+                }
+            }
         }
 
         // nullable=False on non-nullable non-PK columns
@@ -181,9 +193,9 @@ fn generate_class(
 
         // Server default
         if let Some(ref default) = col.column_default {
-            if !is_serial_default(default) {
+            if !is_serial_default(default, dialect) {
                 imports.add("sqlalchemy", "text");
-                let formatted = format_server_default(default);
+                let formatted = format_server_default(default, dialect);
                 mc_args.push(format!("server_default={formatted}"));
             }
         }
@@ -229,6 +241,7 @@ fn build_table_args(
     table: &TableInfo,
     imports: &mut ImportCollector,
     options: &GeneratorOptions,
+    dialect: Dialect,
 ) -> Option<String> {
     let mut args: Vec<String> = Vec::new();
 
@@ -285,7 +298,7 @@ fn build_table_args(
     }
 
     // Schema (if not default)
-    if table.schema != DEFAULT_SCHEMA {
+    if table.schema != dialect.default_schema() {
         args.push(format!("{{'schema': '{}'}}", table.schema));
     }
 
@@ -305,6 +318,7 @@ mod tests {
 
     fn make_simple_schema() -> IntrospectedSchema {
         IntrospectedSchema {
+            dialect: Dialect::Postgres,
             tables: vec![
                 TableInfo {
                     schema: "public".to_string(),

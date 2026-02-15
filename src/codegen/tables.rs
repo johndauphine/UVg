@@ -5,8 +5,9 @@ use crate::codegen::{
     is_primary_key_column, is_serial_default, is_unique_constraint_index,
     quote_constraint_columns, Generator,
 };
+use crate::dialect::Dialect;
 use crate::naming::table_to_variable_name;
-use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo, DEFAULT_SCHEMA};
+use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
 use crate::typemap::map_column_type;
 
 pub struct TablesGenerator;
@@ -22,7 +23,7 @@ impl Generator for TablesGenerator {
         imports.add("sqlalchemy", "Column");
 
         for table in &schema.tables {
-            let block = generate_table(table, &mut imports, options);
+            let block = generate_table(table, &mut imports, options, schema.dialect);
             table_blocks.push(block);
         }
 
@@ -43,6 +44,7 @@ fn generate_table(
     table: &TableInfo,
     imports: &mut ImportCollector,
     options: &GeneratorOptions,
+    dialect: Dialect,
 ) -> String {
     let var_name = table_to_variable_name(&table.name);
     let mut lines: Vec<String> = Vec::new();
@@ -52,7 +54,7 @@ fn generate_table(
 
     // Columns
     for col in &table.columns {
-        let mapped = map_column_type(col);
+        let mapped = map_column_type(col, dialect);
         imports.add(&mapped.import_module, &mapped.import_name);
         if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
             imports.add(elem_mod, elem_name);
@@ -73,13 +75,23 @@ fn generate_table(
             }
         }
 
-        // Identity
+        // Identity — dialect-aware output
         if let Some(ref identity) = col.identity {
             imports.add("sqlalchemy", "Identity");
-            col_args.push(format!(
-                "Identity(start={}, increment={}, minvalue={}, maxvalue={}, cycle=False, cache={})",
-                identity.start, identity.increment, identity.min_value, identity.max_value, identity.cache
-            ));
+            match dialect {
+                Dialect::Postgres => {
+                    col_args.push(format!(
+                        "Identity(start={}, increment={}, minvalue={}, maxvalue={}, cycle=False, cache={})",
+                        identity.start, identity.increment, identity.min_value, identity.max_value, identity.cache
+                    ));
+                }
+                Dialect::Mssql => {
+                    col_args.push(format!(
+                        "Identity(start={}, increment={})",
+                        identity.start, identity.increment
+                    ));
+                }
+            }
         }
 
         // Primary key
@@ -100,9 +112,9 @@ fn generate_table(
         // Server default
         if let Some(ref default) = col.column_default {
             // Skip nextval defaults (auto-generated for serial columns)
-            if !is_serial_default(default) {
+            if !is_serial_default(default, dialect) {
                 imports.add("sqlalchemy", "text");
-                let formatted = format_server_default(default);
+                let formatted = format_server_default(default, dialect);
                 col_args.push(format!("server_default={formatted}"));
             }
         }
@@ -164,7 +176,7 @@ fn generate_table(
     }
 
     // Schema (only if not default)
-    if table.schema != DEFAULT_SCHEMA {
+    if table.schema != dialect.default_schema() {
         lines.push(format!("    schema='{}'", table.schema));
     }
     lines.push(")".to_string());
@@ -180,6 +192,7 @@ mod tests {
 
     fn make_simple_schema() -> IntrospectedSchema {
         IntrospectedSchema {
+            dialect: Dialect::Postgres,
             tables: vec![TableInfo {
                 schema: "public".to_string(),
                 name: "users".to_string(),
