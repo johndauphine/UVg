@@ -115,6 +115,19 @@ Dialect types: `uniqueidentifier`
 
 URL schemes: `mssql://`, `mssql+pytds://`, `mssql+pyodbc://`, `mssql+pymssql://`
 
+## Performance
+
+Benchmarked against sqlacodegen 3.2.0 on the StackOverflow 2010 database (9 tables) using [hyperfine](https://github.com/sharkdp/hyperfine):
+
+| Command | Mean | Min | Max |
+|---|---|---|---|
+| sqlacodegen (PostgreSQL) | 1.140s | 1.099s | 1.167s |
+| **uvg (PostgreSQL)** | **113.4ms** | **108.1ms** | **130.5ms** |
+| sqlacodegen (MSSQL) | 1.187s | 1.134s | 1.231s |
+| **uvg (MSSQL)** | **29.9ms** | **28.1ms** | **32.1ms** |
+
+**10x faster on PostgreSQL, 40x faster on MSSQL.**
+
 ## Building from source
 
 ```bash
