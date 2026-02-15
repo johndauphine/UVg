@@ -118,8 +118,8 @@ URL schemes: `mssql://`, `mssql+pytds://`, `mssql+pyodbc://`, `mssql+pymssql://`
 ## Building from source
 
 ```bash
-git clone https://github.com/johndauphine/UVg.git
-cd UVg
+git clone https://github.com/johndauphine/uvg.git
+cd uvg
 cargo build --release
 ```
 
