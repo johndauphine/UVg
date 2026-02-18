@@ -1,9 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
-    escape_python_string, format_server_default, get_foreign_key_for_column, has_primary_key,
-    has_unique_constraint, is_primary_key_column, is_serial_default, is_unique_constraint_index,
-    quote_constraint_columns, Generator,
+    escape_python_string, format_server_default, has_primary_key, is_primary_key_column,
+    is_serial_default, is_unique_constraint_index, quote_constraint_columns, topo_sort_tables,
+    Generator,
 };
 use crate::dialect::Dialect;
 use crate::naming::{table_to_class_name, table_to_variable_name};
@@ -39,7 +39,8 @@ impl Generator for DeclarativeGenerator {
 
         let metadata_ref = if has_any_pk { "Base.metadata" } else { "metadata" };
 
-        for table in &schema.tables {
+        let sorted_tables = topo_sort_tables(&schema.tables);
+        for table in sorted_tables {
             if has_primary_key(&table.constraints) {
                 let (block, meta) = generate_class(table, &mut imports, options, schema.dialect);
                 if meta.needs_optional {
@@ -170,17 +171,6 @@ fn generate_class(
         // Type argument
         mc_args.push(mapped.sa_type.clone());
 
-        // Foreign key
-        if !options.noconstraints {
-            if let Some(fk_constraint) = get_foreign_key_for_column(&col.name, &table.constraints) {
-                if let Some(ref fk) = fk_constraint.foreign_key {
-                    imports.add("sqlalchemy", "ForeignKey");
-                    let ref_col = format!("{}.{}", fk.ref_table, fk.ref_columns[0]);
-                    mc_args.push(format!("ForeignKey('{ref_col}')"));
-                }
-            }
-        }
-
         // Identity — dialect-aware output
         if let Some(ref identity) = col.identity {
             imports.add("sqlalchemy", "Identity");
@@ -208,11 +198,6 @@ fn generate_class(
         // Primary key
         if is_pk {
             mc_args.push("primary_key=True".to_string());
-        }
-
-        // Unique (single-column)
-        if !options.noconstraints && has_unique_constraint(&col.name, &table.constraints) {
-            mc_args.push("unique=True".to_string());
         }
 
         // Server default
@@ -269,6 +254,30 @@ fn build_table_args(
 ) -> Option<String> {
     let mut args: Vec<String> = Vec::new();
 
+    // Foreign key constraints
+    if !options.noconstraints {
+        for constraint in &table.constraints {
+            if constraint.constraint_type == ConstraintType::ForeignKey {
+                if let Some(ref fk) = constraint.foreign_key {
+                    imports.add("sqlalchemy", "ForeignKeyConstraint");
+                    let local_cols: Vec<String> =
+                        constraint.columns.iter().map(|c| format!("'{c}'")).collect();
+                    let ref_cols: Vec<String> = fk
+                        .ref_columns
+                        .iter()
+                        .map(|c| format!("'{}.{c}'", fk.ref_table))
+                        .collect();
+                    args.push(format!(
+                        "ForeignKeyConstraint([{}], [{}], name='{}')",
+                        local_cols.join(", "),
+                        ref_cols.join(", "),
+                        constraint.name
+                    ));
+                }
+            }
+        }
+    }
+
     // Primary key constraint
     if !options.noconstraints {
         for constraint in &table.constraints {
@@ -284,14 +293,17 @@ fn build_table_args(
         }
     }
 
-    // Multi-column unique constraints
+    // Unique constraints (all, not just multi-column)
     if !options.noconstraints {
         for constraint in &table.constraints {
-            if constraint.constraint_type == ConstraintType::Unique && constraint.columns.len() > 1
-            {
+            if constraint.constraint_type == ConstraintType::Unique {
                 imports.add("sqlalchemy", "UniqueConstraint");
                 let cols = quote_constraint_columns(&constraint.columns);
-                args.push(format!("UniqueConstraint({})", cols.join(", ")));
+                args.push(format!(
+                    "UniqueConstraint({}, name='{}')",
+                    cols.join(", "),
+                    constraint.name
+                ));
             }
         }
     }
@@ -329,7 +341,18 @@ fn build_table_args(
     if args.is_empty() {
         None
     } else {
-        let formatted: Vec<String> = args.iter().map(|a| format!("        {a},")).collect();
+        let last = args.len() - 1;
+        let formatted: Vec<String> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if i < last {
+                    format!("        {a},")
+                } else {
+                    format!("        {a}")
+                }
+            })
+            .collect();
         Some(formatted.join("\n"))
     }
 }
@@ -349,6 +372,9 @@ fn generate_table_fallback(
     lines.push(format!("{var_name} = Table("));
     lines.push(format!("    '{}', {metadata_ref},", table.name));
 
+    // Collect all body items (columns, constraints, indexes, schema)
+    let mut body_items: Vec<String> = Vec::new();
+
     for col in &table.columns {
         let mapped = map_column_type(col, dialect);
         imports.add(&mapped.import_module, &mapped.import_name);
@@ -359,17 +385,6 @@ fn generate_table_fallback(
         let mut col_args: Vec<String> = Vec::new();
         col_args.push(format!("'{}'", col.name));
         col_args.push(mapped.sa_type.clone());
-
-        // Foreign key
-        if !options.noconstraints {
-            if let Some(fk_constraint) = get_foreign_key_for_column(&col.name, &table.constraints) {
-                if let Some(ref fk) = fk_constraint.foreign_key {
-                    imports.add("sqlalchemy", "ForeignKey");
-                    let ref_col = format!("{}.{}", fk.ref_table, fk.ref_columns[0]);
-                    col_args.push(format!("ForeignKey('{ref_col}')"));
-                }
-            }
-        }
 
         // Identity
         if let Some(ref identity) = col.identity {
@@ -395,11 +410,6 @@ fn generate_table_fallback(
             col_args.push("nullable=False".to_string());
         }
 
-        // Unique (single-column)
-        if !options.noconstraints && has_unique_constraint(&col.name, &table.constraints) {
-            col_args.push("unique=True".to_string());
-        }
-
         // Server default
         if let Some(ref default) = col.column_default {
             if !is_serial_default(default, dialect) {
@@ -416,17 +426,44 @@ fn generate_table_fallback(
             }
         }
 
-        lines.push(format!("    Column({}),", col_args.join(", ")));
+        body_items.push(format!("Column({})", col_args.join(", ")));
     }
 
-    // Multi-column unique constraints
+    // Foreign key constraints
     if !options.noconstraints {
         for constraint in &table.constraints {
-            if constraint.constraint_type == ConstraintType::Unique && constraint.columns.len() > 1
-            {
+            if constraint.constraint_type == ConstraintType::ForeignKey {
+                if let Some(ref fk) = constraint.foreign_key {
+                    imports.add("sqlalchemy", "ForeignKeyConstraint");
+                    let local_cols: Vec<String> =
+                        constraint.columns.iter().map(|c| format!("'{c}'")).collect();
+                    let ref_cols: Vec<String> = fk
+                        .ref_columns
+                        .iter()
+                        .map(|c| format!("'{}.{c}'", fk.ref_table))
+                        .collect();
+                    body_items.push(format!(
+                        "ForeignKeyConstraint([{}], [{}], name='{}')",
+                        local_cols.join(", "),
+                        ref_cols.join(", "),
+                        constraint.name
+                    ));
+                }
+            }
+        }
+    }
+
+    // Unique constraints (all, not just multi-column)
+    if !options.noconstraints {
+        for constraint in &table.constraints {
+            if constraint.constraint_type == ConstraintType::Unique {
                 imports.add("sqlalchemy", "UniqueConstraint");
                 let cols = quote_constraint_columns(&constraint.columns);
-                lines.push(format!("    UniqueConstraint({}),", cols.join(", ")));
+                body_items.push(format!(
+                    "UniqueConstraint({}, name='{}')",
+                    cols.join(", "),
+                    constraint.name
+                ));
             }
         }
     }
@@ -440,8 +477,8 @@ fn generate_table_fallback(
             imports.add("sqlalchemy", "Index");
             let cols = quote_constraint_columns(&index.columns);
             let unique_str = if index.is_unique { ", unique=True" } else { "" };
-            lines.push(format!(
-                "    Index('{}', {}{}),",
+            body_items.push(format!(
+                "Index('{}', {}{})",
                 index.name,
                 cols.join(", "),
                 unique_str
@@ -451,8 +488,19 @@ fn generate_table_fallback(
 
     // Schema (only if not default)
     if table.schema != dialect.default_schema() {
-        lines.push(format!("    schema='{}'", table.schema));
+        body_items.push(format!("schema='{}'", table.schema));
     }
+
+    // Add body items with commas on all but the last
+    let last = body_items.len().saturating_sub(1);
+    for (i, item) in body_items.iter().enumerate() {
+        if i < last {
+            lines.push(format!("    {item},"));
+        } else {
+            lines.push(format!("    {item}"));
+        }
+    }
+
     lines.push(")".to_string());
 
     lines.join("\n")
@@ -570,11 +618,13 @@ mod tests {
         assert!(output.contains("PrimaryKeyConstraint('id', name='users_pkey'),"));
         assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
         assert!(output.contains("name: Mapped[str] = mapped_column(String(100), nullable=False)"));
-        assert!(output.contains("email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)"));
+        assert!(output.contains("email: Mapped[str] = mapped_column(String(255), nullable=False)"));
         assert!(output.contains("bio: Mapped[Optional[str]] = mapped_column(Text)"));
         assert!(output.contains("class Posts(Base):"));
         assert!(output
-            .contains("user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), nullable=False)"));
+            .contains("user_id: Mapped[int] = mapped_column(Integer, nullable=False)"));
+        assert!(output.contains("UniqueConstraint('email', name='users_email_key')"));
+        assert!(output.contains("ForeignKeyConstraint(['user_id'], ['users.id'], name='posts_user_id_fkey')"));
     }
 
     #[test]
@@ -651,17 +701,17 @@ mod tests {
         // The no-PK table should be a Table() assignment
         assert!(output.contains("t_audit_log = Table("));
         assert!(output.contains("'audit_log', Base.metadata,"));
-        assert!(output.contains("Column('ts', DateTime(timezone=True), nullable=False)"));
+        assert!(output.contains("Column('ts', DateTime(True), nullable=False)"));
         assert!(output.contains("Column('action', Text, nullable=False)"));
         assert!(output.contains("Column('detail', Text)"));
 
         // Should NOT generate a class for no-PK table
         assert!(!output.contains("class AuditLog(Base):"));
 
-        // Blocks should appear in schema order (users first, then audit_log)
-        let class_pos = output.find("class Users(Base):").unwrap();
+        // With topo sort + alphabetical tiebreak, audit_log comes before users
         let table_pos = output.find("t_audit_log = Table(").unwrap();
-        assert!(class_pos < table_pos);
+        let class_pos = output.find("class Users(Base):").unwrap();
+        assert!(table_pos < class_pos);
     }
 
     #[test]

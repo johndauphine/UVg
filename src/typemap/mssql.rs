@@ -69,7 +69,7 @@ pub fn map_column_type(col: &ColumnInfo) -> MappedType {
             simple("DateTime", "datetime.datetime", "sqlalchemy")
         }
         "datetimeoffset" => MappedType {
-            sa_type: "DateTime(timezone=True)".to_string(),
+            sa_type: "DateTime(True)".to_string(),
             python_type: "datetime.datetime".to_string(),
             import_module: "sqlalchemy".to_string(),
             import_name: "DateTime".to_string(),
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(map_column_type(&col("smalldatetime")).sa_type, "DateTime");
         assert_eq!(
             map_column_type(&col("datetimeoffset")).sa_type,
-            "DateTime(timezone=True)"
+            "DateTime(True)"
         );
         assert_eq!(map_column_type(&col("date")).sa_type, "Date");
         assert_eq!(map_column_type(&col("time")).sa_type, "Time");
