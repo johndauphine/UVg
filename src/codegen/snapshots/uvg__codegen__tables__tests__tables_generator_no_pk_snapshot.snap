@@ -1,0 +1,6 @@
+---
+source: src/codegen/tables.rs
+assertion_line: 341
+expression: output
+---
+"from sqlalchemy import Column, DateTime, MetaData, Table, Text\n\nmetadata = MetaData()\n\n\nt_audit_log = Table(\n    'audit_log', metadata,\n    Column('ts', DateTime(True), nullable=False),\n    Column('action', Text, nullable=False),\n    Column('detail', Text)\n)\n"

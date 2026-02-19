@@ -1,0 +1,6 @@
+---
+source: src/codegen/declarative.rs
+assertion_line: 789
+expression: output
+---
+"from sqlalchemy import Column, DateTime, MetaData, Table, Text\n\nmetadata = MetaData()\n\n\nt_events = Table(\n    'events', metadata,\n    Column('ts', DateTime(True), nullable=False),\n    Column('data', Text, nullable=False)\n)\n"

@@ -1,0 +1,6 @@
+---
+source: src/codegen/declarative.rs
+assertion_line: 720
+expression: output
+---
+"from sqlalchemy import Column, DateTime, Integer, PrimaryKeyConstraint, String, Table, Text\nfrom sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column\n\nclass Base(DeclarativeBase):\n    pass\n\n\nt_audit_log = Table(\n    'audit_log', Base.metadata,\n    Column('ts', DateTime(True), nullable=False),\n    Column('action', Text, nullable=False),\n    Column('detail', Text)\n)\n\n\nclass Users(Base):\n    __tablename__ = 'users'\n    __table_args__ = (\n        PrimaryKeyConstraint('id', name='users_pkey')\n    )\n\n    id: Mapped[int] = mapped_column(Integer, primary_key=True)\n    name: Mapped[str] = mapped_column(String(100), nullable=False)\n"
