@@ -45,6 +45,9 @@ pub struct GeneratorOptions {
     pub noindexes: bool,
     pub noconstraints: bool,
     pub nocomments: bool,
+    pub nobidi: bool,
+    pub nofknames: bool,
+    pub noidsuffix: bool,
 }
 
 /// Parsed connection configuration.

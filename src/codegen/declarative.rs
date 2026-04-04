@@ -251,7 +251,11 @@ fn generate_class(
         if let Some(fk_constraint) = inline_fk {
             if let Some(ref fk) = fk_constraint.foreign_key {
                 imports.add("sqlalchemy", "ForeignKey");
-                let target = format!("'{}.{}'", fk.ref_table, fk.ref_columns[0]);
+                let target = if fk.ref_schema != dialect.default_schema() {
+                    format!("'{}.{}.{}'", fk.ref_schema, fk.ref_table, fk.ref_columns[0])
+                } else {
+                    format!("'{}.{}'", fk.ref_table, fk.ref_columns[0])
+                };
                 mc_args.push(format!("ForeignKey({target})"));
             }
             // unique=True if FK column has a unique constraint (one-to-one)
@@ -343,14 +347,24 @@ fn generate_class(
     }
 
     // Relationships (suppressed when noconstraints)
-    let (parent_rels, child_rels) = if !options.noconstraints {
-        (
-            generate_parent_relationships(table, schema),
-            generate_child_relationships(table, schema),
-        )
+    let (parent_rels, mut child_rels) = if !options.noconstraints {
+        let parent = if !options.nobidi {
+            generate_parent_relationships(table, schema)
+        } else {
+            vec![]
+        };
+        let child = generate_child_relationships(table, schema);
+        (parent, child)
     } else {
         (vec![], vec![])
     };
+
+    // When nobidi, strip back_populates from child relationships
+    if options.nobidi {
+        for rel in &mut child_rels {
+            rel.back_populates.clear();
+        }
+    }
 
     if !parent_rels.is_empty() || !child_rels.is_empty() {
         imports.add("sqlalchemy.orm", "relationship");
@@ -1333,5 +1347,118 @@ mod tests {
         // import enum
         assert!(output.contains("import enum"));
         assert!(output.contains("Enum"));
+    }
+
+    // --- PR 5: Advanced relationship tests ---
+
+    /// Adapted from sqlacodegen test_onetomany_multiref.
+    /// Two FKs from child to same parent — needs disambiguation.
+    #[test]
+    fn test_declarative_onetomany_multiref() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("parent_container_id").nullable().build())
+                .column(col("top_container_id").build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_parent_fkey", &["parent_container_id"], "simple_containers", &["id"])
+                .fk("si_top_fkey", &["top_container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Parent side: disambiguated relationship names
+        assert!(output.contains("simple_items_parent_container: Mapped[list['SimpleItems']]"));
+        assert!(output.contains("simple_items_top_container: Mapped[list['SimpleItems']]"));
+        // Child side: foreign_keys disambiguation
+        assert!(output.contains("parent_container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', foreign_keys=[parent_container_id], back_populates='simple_items_parent_container')"));
+        assert!(output.contains("top_container: Mapped['SimpleContainers'] = relationship('SimpleContainers', foreign_keys=[top_container_id], back_populates='simple_items_top_container')"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_selfref_multi.
+    #[test]
+    fn test_declarative_onetomany_selfref_multi() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("parent_item_id").nullable().build())
+                .column(col("top_item_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_parent_fkey", &["parent_item_id"], "simple_items", &["id"])
+                .fk("si_top_fkey", &["top_item_id"], "simple_items", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Each self-ref FK gets foreign_keys disambiguation
+        assert!(output.contains("parent_item: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', remote_side=[id], foreign_keys=[parent_item_id], back_populates='parent_item_reverse')"));
+        assert!(output.contains("top_item: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', remote_side=[id], foreign_keys=[top_item_id], back_populates='top_item_reverse')"));
+    }
+
+    /// Adapted from sqlacodegen test_manytoone_nobidi.
+    #[test]
+    fn test_declarative_manytoone_nobidi() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_container_fkey", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nobidi: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+
+        // Child has relationship without back_populates
+        assert!(output.contains("container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers')"));
+        // Parent should NOT have reverse relationship
+        assert!(!output.contains("simple_items: Mapped[list"));
+    }
+
+    /// Adapted from sqlacodegen test_foreign_key_schema.
+    #[test]
+    fn test_declarative_foreign_key_schema() {
+        let schema = schema_pg(vec![
+            table("other_items")
+                .schema("otherschema")
+                .column(col("id").build())
+                .pk("other_items_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("other_item_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk_full(
+                    "si_other_fkey",
+                    &["other_item_id"],
+                    "otherschema",
+                    "other_items",
+                    &["id"],
+                    "NO ACTION",
+                    "NO ACTION",
+                )
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // FK target includes schema prefix
+        assert!(output.contains("ForeignKey('otherschema.other_items.id')"));
+        // Parent table has schema in __table_args__
+        assert!(output.contains("__table_args__ = {'schema': 'otherschema'}"));
     }
 }

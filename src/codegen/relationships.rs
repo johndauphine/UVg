@@ -306,7 +306,9 @@ pub fn render_relationship(rel: &RelationshipInfo) -> String {
         args.push(format!("foreign_keys={fk}"));
     }
 
-    args.push(format!("back_populates='{}'", rel.back_populates));
+    if !rel.back_populates.is_empty() {
+        args.push(format!("back_populates='{}'", rel.back_populates));
+    }
 
     let args_str = args.join(", ");
     format!(
