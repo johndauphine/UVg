@@ -86,11 +86,22 @@ pub fn generate_child_relationships(
         .filter(|c| c.constraint_type == ConstraintType::ForeignKey)
         .collect();
 
+    // Check if this table uses inheritance (skip the inheritance FK for relationships)
+    let inheritance_parent = find_inheritance_parent(table, _schema);
+
     for constraint in &fk_constraints {
         let fk = match &constraint.foreign_key {
             Some(fk) => fk,
             None => continue,
         };
+
+        // Skip inheritance FK — it's rendered as ForeignKey on mapped_column, not as a relationship
+        if inheritance_parent.is_some()
+            && is_single_column_fk(constraint)
+            && fk.ref_table == inheritance_parent.unwrap()
+        {
+            continue;
+        }
 
         let target_class = table_to_class_name(&fk.ref_table);
         let is_selfref = fk.ref_table == table.name;
@@ -207,6 +218,11 @@ pub fn generate_parent_relationships(
 
         // Skip association tables — they generate M2M relationships instead
         if is_association_table(child_table) {
+            continue;
+        }
+
+        // Skip inheritance children — the FK represents inheritance, not a relationship
+        if find_inheritance_parent(child_table, schema).is_some() {
             continue;
         }
 
@@ -412,6 +428,51 @@ fn derive_m2m_rel_name(assoc_table: &TableInfo, other_table: &str) -> String {
     }
     // Fallback: use the other table name
     other_table.to_string()
+}
+
+/// Detect joined table inheritance: returns the parent table name if this table's
+/// PK column is also a single-column FK to another table's PK.
+pub fn find_inheritance_parent<'a>(
+    table: &TableInfo,
+    schema: &'a IntrospectedSchema,
+) -> Option<&'a str> {
+    // Get PK columns
+    let pk_constraint = table
+        .constraints
+        .iter()
+        .find(|c| c.constraint_type == ConstraintType::PrimaryKey)?;
+
+    if pk_constraint.columns.len() != 1 {
+        return None;
+    }
+
+    let pk_col = &pk_constraint.columns[0];
+
+    // Check if PK column is also a single-column FK
+    let fk = table.constraints.iter().find(|c| {
+        c.constraint_type == ConstraintType::ForeignKey
+            && c.columns.len() == 1
+            && c.columns[0] == *pk_col
+    })?;
+
+    let fk_info = fk.foreign_key.as_ref()?;
+
+    // Verify the target is a PK in the parent table
+    let parent = schema
+        .tables
+        .iter()
+        .find(|t| t.name == fk_info.ref_table)?;
+
+    let parent_pk = parent
+        .constraints
+        .iter()
+        .find(|c| c.constraint_type == ConstraintType::PrimaryKey)?;
+
+    if parent_pk.columns.contains(&fk_info.ref_columns[0]) {
+        Some(&parent.name)
+    } else {
+        None
+    }
 }
 
 /// Render a relationship line.

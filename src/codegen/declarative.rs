@@ -1,9 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::relationships::{
-    find_inline_fk, generate_child_relationships, generate_m2m_relationships,
-    generate_parent_relationships, has_unique_constraint, is_association_table,
-    render_relationship,
+    find_inheritance_parent, find_inline_fk, generate_child_relationships,
+    generate_m2m_relationships, generate_parent_relationships, has_unique_constraint,
+    is_association_table, render_relationship,
 };
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
@@ -150,7 +150,15 @@ fn generate_class(
         needs_uuid: false,
     };
 
-    lines.push(format!("class {class_name}(Base):"));
+    // Check for joined table inheritance
+    let parent_table_name = find_inheritance_parent(table, schema);
+    let base_class = if let Some(parent_name) = parent_table_name {
+        table_to_class_name(parent_name)
+    } else {
+        "Base".to_string()
+    };
+
+    lines.push(format!("class {class_name}({base_class}):"));
     lines.push(format!("    __tablename__ = '{}'", table.name));
 
     // Table-level args (multi-column unique constraints, indexes, comments, schema)
@@ -1558,5 +1566,49 @@ mod tests {
 
         // No class for association table
         assert!(!output.contains("class AssociationTable"));
+    }
+
+    /// Adapted from sqlacodegen test_joined_inheritance.
+    #[test]
+    fn test_declarative_joined_inheritance() {
+        let schema = schema_pg(vec![
+            table("simple_super_items")
+                .column(col("id").build())
+                .column(col("data1").nullable().build())
+                .pk("simple_super_items_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("super_item_id").build())
+                .column(col("data2").nullable().build())
+                .pk("simple_items_pkey", &["super_item_id"])
+                .fk("si_super_fkey", &["super_item_id"], "simple_super_items", &["id"])
+                .build(),
+            table("simple_sub_items")
+                .column(col("simple_items_id").build())
+                .column(col("data3").nullable().build())
+                .pk("simple_sub_items_pkey", &["simple_items_id"])
+                .fk("ssi_items_fkey", &["simple_items_id"], "simple_items", &["super_item_id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Parent class
+        assert!(output.contains("class SimpleSuperItems(Base):"));
+        assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
+        assert!(output.contains("data1: Mapped[Optional[int]] = mapped_column(Integer)"));
+
+        // Child inherits from parent
+        assert!(output.contains("class SimpleItems(SimpleSuperItems):"));
+        assert!(output.contains("super_item_id: Mapped[int] = mapped_column(ForeignKey('simple_super_items.id'), primary_key=True)"));
+        assert!(output.contains("data2: Mapped[Optional[int]] = mapped_column(Integer)"));
+
+        // Grandchild inherits from child
+        assert!(output.contains("class SimpleSubItems(SimpleItems):"));
+        assert!(output.contains("simple_items_id: Mapped[int] = mapped_column(ForeignKey('simple_items.super_item_id'), primary_key=True)"));
+        assert!(output.contains("data3: Mapped[Optional[int]] = mapped_column(Integer)"));
+
+        // No relationship() calls for inheritance FKs
+        assert!(!output.contains("relationship("));
     }
 }
