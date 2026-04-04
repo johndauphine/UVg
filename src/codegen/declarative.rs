@@ -1,5 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
+use crate::codegen::relationships::{
+    find_inline_fk, generate_child_relationships, generate_parent_relationships,
+    has_unique_constraint, render_relationship,
+};
 use crate::codegen::{
     escape_python_string, format_fk_options, format_python_string_literal,
     format_server_default, has_primary_key, is_primary_key_column, is_serial_default,
@@ -42,7 +46,7 @@ impl Generator for DeclarativeGenerator {
         let sorted_tables = topo_sort_tables(&schema.tables);
         for table in sorted_tables {
             if has_primary_key(&table.constraints) {
-                let (block, meta) = generate_class(table, &mut imports, options, schema.dialect);
+                let (block, meta) = generate_class(table, &mut imports, options, schema.dialect, schema);
                 if meta.needs_optional {
                     needs_optional = true;
                 }
@@ -106,6 +110,7 @@ fn generate_class(
     imports: &mut ImportCollector,
     options: &GeneratorOptions,
     dialect: Dialect,
+    schema: &IntrospectedSchema,
 ) -> (String, ClassMeta) {
     let class_name = table_to_class_name(&table.name);
     let mut lines: Vec<String> = Vec::new();
@@ -196,8 +201,26 @@ fn generate_class(
             mc_args.push(format_python_string_literal(&col.name));
         }
 
-        // Type argument
-        mc_args.push(mapped.sa_type.clone());
+        // Check for single-column FK — use ForeignKey() instead of type
+        let inline_fk = if !options.noconstraints {
+            find_inline_fk(&col.name, &table.constraints)
+        } else {
+            None
+        };
+        if let Some(fk_constraint) = inline_fk {
+            if let Some(ref fk) = fk_constraint.foreign_key {
+                imports.add("sqlalchemy", "ForeignKey");
+                let target = format!("'{}.{}'", fk.ref_table, fk.ref_columns[0]);
+                mc_args.push(format!("ForeignKey({target})"));
+            }
+            // unique=True if FK column has a unique constraint (one-to-one)
+            if has_unique_constraint(&col.name, &table.constraints) {
+                mc_args.push("unique=True".to_string());
+            }
+        } else {
+            // No inline FK — use SA type
+            mc_args.push(mapped.sa_type.clone());
+        }
 
         // Identity — dialect-aware output
         if let Some(ref identity) = col.identity {
@@ -278,6 +301,28 @@ fn generate_class(
         lines.push(col_line.line.clone());
     }
 
+    // Relationships (suppressed when noconstraints)
+    let (parent_rels, child_rels) = if !options.noconstraints {
+        (
+            generate_parent_relationships(table, schema),
+            generate_child_relationships(table, schema),
+        )
+    } else {
+        (vec![], vec![])
+    };
+
+    if !parent_rels.is_empty() || !child_rels.is_empty() {
+        imports.add("sqlalchemy.orm", "relationship");
+        lines.push(String::new()); // blank line before relationships
+
+        for rel in parent_rels.iter().chain(child_rels.iter()) {
+            if rel.is_nullable && !rel.is_collection {
+                meta.needs_optional = true;
+            }
+            lines.push(render_relationship(rel));
+        }
+    }
+
     (lines.join("\n"), meta)
 }
 
@@ -307,10 +352,12 @@ fn build_table_args(
     let mut positional_args: Vec<String> = Vec::new();
     let mut kwargs: Vec<String> = Vec::new();
 
-    // Foreign key constraints
+    // Foreign key constraints (only multi-column; single-column FKs are inline on mapped_column)
     if !options.noconstraints {
         for constraint in &table.constraints {
-            if constraint.constraint_type == ConstraintType::ForeignKey {
+            if constraint.constraint_type == ConstraintType::ForeignKey
+                && constraint.columns.len() > 1
+            {
                 if let Some(ref fk) = constraint.foreign_key {
                     imports.add("sqlalchemy", "ForeignKeyConstraint");
                     let local_cols: Vec<String> =
@@ -627,9 +674,10 @@ mod tests {
         assert!(output.contains("bio: Mapped[Optional[str]] = mapped_column(Text)"));
         assert!(output.contains("class Posts(Base):"));
         assert!(output
-            .contains("user_id: Mapped[int] = mapped_column(Integer, nullable=False)"));
+            .contains("user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)"));
         assert!(output.contains("UniqueConstraint('email', name='users_email_key')"));
-        assert!(output.contains("ForeignKeyConstraint(['user_id'], ['users.id'], name='posts_user_id_fkey')"));
+        // Single-column FK is now inline on mapped_column, not in __table_args__
+        assert!(!output.contains("ForeignKeyConstraint"));
     }
 
     #[test]
@@ -1053,5 +1101,155 @@ mod tests {
         let gen = DeclarativeGenerator;
         let output = gen.generate(&schema, &GeneratorOptions::default());
         assert!(output.contains("__tablename__ = 'customer_API_Preference'"));
+    }
+
+    // --- Tier 3: Relationship tests adapted from sqlacodegen ---
+
+    /// Adapted from sqlacodegen test_onetomany.
+    #[test]
+    fn test_declarative_onetomany() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("simple_items_container_id_fkey", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Parent side: collection relationship
+        assert!(output.contains("simple_items: Mapped[list['SimpleItems']] = relationship('SimpleItems', back_populates='container')"));
+
+        // Child side: inline FK + scalar relationship
+        assert!(output.contains("container_id: Mapped[Optional[int]] = mapped_column(ForeignKey('simple_containers.id'))"));
+        assert!(output.contains("container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', back_populates='simple_items')"));
+
+        // Should import relationship
+        assert!(output.contains("relationship"));
+        // Should import ForeignKey (not ForeignKeyConstraint)
+        assert!(output.contains("ForeignKey"));
+        assert!(!output.contains("ForeignKeyConstraint"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_selfref.
+    #[test]
+    fn test_declarative_onetomany_selfref() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("parent_item_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("simple_items_parent_item_id_fkey", &["parent_item_id"], "simple_items", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Inline FK
+        assert!(output.contains("parent_item_id: Mapped[Optional[int]] = mapped_column(ForeignKey('simple_items.id'))"));
+        // Forward relationship with remote_side
+        assert!(output.contains("parent_item: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', remote_side=[id], back_populates='parent_item_reverse')"));
+        // Reverse relationship
+        assert!(output.contains("parent_item_reverse: Mapped[list['SimpleItems']] = relationship('SimpleItems', remote_side=[parent_item_id], back_populates='parent_item')"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_composite.
+    #[test]
+    fn test_declarative_onetomany_composite() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id1").build())
+                .column(col("id2").build())
+                .pk("simple_containers_pkey", &["id1", "id2"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id1").nullable().build())
+                .column(col("container_id2").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk_full(
+                    "simple_items_fkey",
+                    &["container_id1", "container_id2"],
+                    "public",
+                    "simple_containers",
+                    &["id1", "id2"],
+                    "CASCADE",
+                    "CASCADE",
+                )
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Composite FK stays in __table_args__
+        assert!(output.contains("ForeignKeyConstraint(['container_id1', 'container_id2']"));
+        assert!(output.contains("ondelete='CASCADE'"));
+        // Columns keep their types (no inline ForeignKey)
+        assert!(output.contains("container_id1: Mapped[Optional[int]] = mapped_column(Integer)"));
+        assert!(output.contains("container_id2: Mapped[Optional[int]] = mapped_column(Integer)"));
+        // Parent-side relationship
+        assert!(output.contains("simple_items: Mapped[list['SimpleItems']] = relationship('SimpleItems', back_populates='simple_containers')"));
+        // Child-side relationship
+        assert!(output.contains("simple_containers: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', back_populates='simple_items')"));
+    }
+
+    /// Adapted from sqlacodegen test_onetoone.
+    #[test]
+    fn test_declarative_onetoone() {
+        let schema = schema_pg(vec![
+            table("other_items")
+                .column(col("id").build())
+                .pk("other_items_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("other_item_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("simple_items_other_item_id_fkey", &["other_item_id"], "other_items", &["id"])
+                .unique("simple_items_other_item_id_key", &["other_item_id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Parent side: one-to-one (uselist=False, Optional scalar)
+        assert!(output.contains("simple_items: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', uselist=False, back_populates='other_item')"));
+        // Child side: FK with unique=True
+        assert!(output.contains("other_item_id: Mapped[Optional[int]] = mapped_column(ForeignKey('other_items.id'), unique=True)"));
+        // Child side relationship
+        assert!(output.contains("other_item: Mapped[Optional['OtherItems']] = relationship('OtherItems', back_populates='simple_items')"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_noinflect.
+    /// FK column without _id suffix — relationship name = FK column name.
+    #[test]
+    fn test_declarative_onetomany_noinflect() {
+        let schema = schema_pg(vec![
+            table("fehwiuhfiw")
+                .column(col("id").build())
+                .pk("fehwiuhfiw_pkey", &["id"])
+                .build(),
+            table("oglkrogk")
+                .column(col("id").build())
+                .column(col("fehwiuhfiwID").nullable().build())
+                .pk("oglkrogk_pkey", &["id"])
+                .fk("oglkrogk_fehwiuhfiwid_fkey", &["fehwiuhfiwID"], "fehwiuhfiw", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // FK column has uppercase ID suffix — stripped
+        assert!(output.contains("fehwiuhfiwID: Mapped[Optional[int]] = mapped_column(ForeignKey('fehwiuhfiw.id'))"));
+        // Parent-side relationship
+        assert!(output.contains("oglkrogk: Mapped[list['Oglkrogk']] = relationship('Oglkrogk', back_populates='fehwiuhfiw')"));
+        // Child-side relationship: fehwiuhfiwID stripped to fehwiuhfiw
+        assert!(output.contains("fehwiuhfiw: Mapped[Optional['Fehwiuhfiw']] = relationship('Fehwiuhfiw', back_populates='oglkrogk')"));
     }
 }

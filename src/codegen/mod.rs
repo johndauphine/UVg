@@ -1,5 +1,6 @@
 pub mod declarative;
 pub mod imports;
+pub mod relationships;
 pub mod tables;
 
 use crate::cli::GeneratorOptions;
