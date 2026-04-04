@@ -1,8 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::relationships::{
-    find_inline_fk, generate_child_relationships, generate_parent_relationships,
-    has_unique_constraint, render_relationship,
+    find_inline_fk, generate_child_relationships, generate_m2m_relationships,
+    generate_parent_relationships, has_unique_constraint, is_association_table,
+    render_relationship,
 };
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
@@ -58,7 +59,11 @@ impl Generator for DeclarativeGenerator {
                 }
             }
 
-            if has_primary_key(&table.constraints) {
+            if is_association_table(table) {
+                // M2M association table: render as Table() with ForeignKey on columns
+                let block = generate_association_table(table, &mut imports, options, schema.dialect, metadata_ref);
+                blocks.push(block);
+            } else if has_primary_key(&table.constraints) {
                 let (block, meta) = generate_class(table, &mut imports, options, schema.dialect, schema);
                 if meta.needs_optional {
                     needs_optional = true;
@@ -347,16 +352,17 @@ fn generate_class(
     }
 
     // Relationships (suppressed when noconstraints)
-    let (parent_rels, mut child_rels) = if !options.noconstraints {
+    let (parent_rels, mut child_rels, m2m_rels) = if !options.noconstraints {
         let parent = if !options.nobidi {
             generate_parent_relationships(table, schema)
         } else {
             vec![]
         };
         let child = generate_child_relationships(table, schema);
-        (parent, child)
+        let m2m = generate_m2m_relationships(table, schema);
+        (parent, child, m2m)
     } else {
-        (vec![], vec![])
+        (vec![], vec![], vec![])
     };
 
     // When nobidi, strip back_populates from child relationships
@@ -366,11 +372,12 @@ fn generate_class(
         }
     }
 
-    if !parent_rels.is_empty() || !child_rels.is_empty() {
+    let all_rels_empty = parent_rels.is_empty() && child_rels.is_empty() && m2m_rels.is_empty();
+    if !all_rels_empty {
         imports.add("sqlalchemy.orm", "relationship");
         lines.push(String::new()); // blank line before relationships
 
-        for rel in parent_rels.iter().chain(child_rels.iter()) {
+        for rel in parent_rels.iter().chain(m2m_rels.iter()).chain(child_rels.iter()) {
             if rel.is_nullable && !rel.is_collection {
                 meta.needs_optional = true;
             }
@@ -538,6 +545,61 @@ fn build_table_args(
 
 /// Generate a Table() assignment for a table without a primary key.
 /// Uses the provided `metadata_ref` (e.g. `Base.metadata` or standalone `metadata`) as the metadata reference.
+/// Generate a Table() for M2M association tables.
+/// Columns use ForeignKey() inline (not ForeignKeyConstraint).
+fn generate_association_table(
+    table: &TableInfo,
+    imports: &mut ImportCollector,
+    options: &GeneratorOptions,
+    dialect: Dialect,
+    metadata_ref: &str,
+) -> String {
+    let var_name = table_to_variable_name(&table.name);
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("{var_name} = Table("));
+    lines.push(format!("    '{}', {metadata_ref},", table.name));
+
+    let mut body_items: Vec<String> = Vec::new();
+
+    for col_info in &table.columns {
+        // Find FK for this column
+        let fk = find_inline_fk(&col_info.name, &table.constraints);
+        if let Some(fk_constraint) = fk {
+            if let Some(ref fk_info) = fk_constraint.foreign_key {
+                imports.add("sqlalchemy", "ForeignKey");
+                let target = if fk_info.ref_schema != dialect.default_schema() {
+                    format!("{}.{}.{}", fk_info.ref_schema, fk_info.ref_table, fk_info.ref_columns[0])
+                } else {
+                    format!("{}.{}", fk_info.ref_table, fk_info.ref_columns[0])
+                };
+                body_items.push(format!("Column('{}', ForeignKey('{}'))", col_info.name, target));
+            }
+        } else {
+            let mapped = map_column_type(col_info, dialect);
+            imports.add(&mapped.import_module, &mapped.import_name);
+            body_items.push(format!("Column('{}', {})", col_info.name, mapped.sa_type));
+        }
+    }
+
+    // Schema (only if not default)
+    if table.schema != dialect.default_schema() {
+        body_items.push(format!("schema='{}'", table.schema));
+    }
+
+    let last = body_items.len().saturating_sub(1);
+    for (i, item) in body_items.iter().enumerate() {
+        if i < last {
+            lines.push(format!("    {item},"));
+        } else {
+            lines.push(format!("    {item}"));
+        }
+    }
+
+    lines.push(")".to_string());
+    lines.join("\n")
+}
+
 fn generate_table_fallback(
     table: &TableInfo,
     imports: &mut ImportCollector,
@@ -1460,5 +1522,41 @@ mod tests {
         assert!(output.contains("ForeignKey('otherschema.other_items.id')"));
         // Parent table has schema in __table_args__
         assert!(output.contains("__table_args__ = {'schema': 'otherschema'}"));
+    }
+
+    /// Adapted from sqlacodegen test_manytomany.
+    #[test]
+    fn test_declarative_manytomany() {
+        let schema = schema_pg(vec![
+            table("left_table")
+                .column(col("id").build())
+                .pk("left_table_pkey", &["id"])
+                .build(),
+            table("right_table")
+                .column(col("id").build())
+                .pk("right_table_pkey", &["id"])
+                .build(),
+            table("association_table")
+                .column(col("left_id").nullable().build())
+                .column(col("right_id").nullable().build())
+                .fk("assoc_left_fkey", &["left_id"], "left_table", &["id"])
+                .fk("assoc_right_fkey", &["right_id"], "right_table", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Association table rendered as Table()
+        assert!(output.contains("t_association_table = Table("));
+        assert!(output.contains("Column('left_id', ForeignKey('left_table.id'))"));
+        assert!(output.contains("Column('right_id', ForeignKey('right_table.id'))"));
+
+        // Left table gets M2M relationship to right
+        assert!(output.contains("right: Mapped[list['RightTable']] = relationship('RightTable', secondary='association_table', back_populates='left')"));
+        // Right table gets M2M relationship to left
+        assert!(output.contains("left: Mapped[list['LeftTable']] = relationship('LeftTable', secondary='association_table', back_populates='right')"));
+
+        // No class for association table
+        assert!(!output.contains("class AssociationTable"));
     }
 }

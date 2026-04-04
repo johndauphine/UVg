@@ -19,6 +19,8 @@ pub struct RelationshipInfo {
     pub foreign_keys: Option<String>,
     /// Explicit uselist=False (for one-to-one on parent side)
     pub uselist_false: bool,
+    /// For M2M: the secondary (association) table name
+    pub secondary: Option<String>,
 }
 
 /// Find the single-column FK constraint for a given column, if any.
@@ -121,6 +123,7 @@ pub fn generate_child_relationships(
                         None
                     },
                     uselist_false: false,
+                    secondary: None,
                 });
                 rels.push(RelationshipInfo {
                     attr_name: reverse_name,
@@ -135,6 +138,7 @@ pub fn generate_child_relationships(
                         None
                     },
                     uselist_false: false,
+                    secondary: None,
                 });
             } else {
                 let back_pop = if multi_ref {
@@ -156,6 +160,7 @@ pub fn generate_child_relationships(
                         None
                     },
                     uselist_false: false,
+                    secondary: None,
                 });
             }
         } else {
@@ -180,6 +185,7 @@ pub fn generate_child_relationships(
                 remote_side: None,
                 foreign_keys: None,
                 uselist_false: false,
+                secondary: None,
             });
         }
     }
@@ -196,6 +202,11 @@ pub fn generate_parent_relationships(
 
     for child_table in &schema.tables {
         if child_table.name == parent_table.name {
+            continue;
+        }
+
+        // Skip association tables — they generate M2M relationships instead
+        if is_association_table(child_table) {
             continue;
         }
 
@@ -241,6 +252,7 @@ pub fn generate_parent_relationships(
                             None
                         },
                         uselist_false: true,
+                        secondary: None,
                     });
                 } else {
                     // One-to-many: list on parent side
@@ -257,6 +269,7 @@ pub fn generate_parent_relationships(
                             None
                         },
                         uselist_false: false,
+                        secondary: None,
                     });
                 }
             } else {
@@ -273,12 +286,132 @@ pub fn generate_parent_relationships(
                     remote_side: None,
                     foreign_keys: None,
                     uselist_false: false,
+                    secondary: None,
                 });
             }
         }
     }
 
     rels
+}
+
+/// Check if a table is a many-to-many association table.
+/// An association table has exactly 2 FKs and no columns that aren't part of those FKs.
+pub fn is_association_table(table: &TableInfo) -> bool {
+    let fk_constraints: Vec<&ConstraintInfo> = table
+        .constraints
+        .iter()
+        .filter(|c| c.constraint_type == ConstraintType::ForeignKey)
+        .collect();
+
+    if fk_constraints.len() != 2 {
+        return false;
+    }
+
+    // All columns must be FK columns
+    let fk_cols: std::collections::HashSet<&str> = fk_constraints
+        .iter()
+        .flat_map(|c| c.columns.iter().map(|s| s.as_str()))
+        .collect();
+
+    table.columns.iter().all(|c| fk_cols.contains(c.name.as_str()))
+}
+
+/// For a many-to-many association table, get the two target table names and
+/// the relationship info for each side.
+pub fn get_m2m_targets(assoc_table: &TableInfo) -> Option<(String, String)> {
+    let fk_constraints: Vec<&ConstraintInfo> = assoc_table
+        .constraints
+        .iter()
+        .filter(|c| c.constraint_type == ConstraintType::ForeignKey)
+        .collect();
+
+    if fk_constraints.len() != 2 {
+        return None;
+    }
+
+    let t1 = fk_constraints[0]
+        .foreign_key
+        .as_ref()
+        .map(|fk| fk.ref_table.clone())?;
+    let t2 = fk_constraints[1]
+        .foreign_key
+        .as_ref()
+        .map(|fk| fk.ref_table.clone())?;
+
+    Some((t1, t2))
+}
+
+/// Generate M2M relationships for a table based on association tables pointing to it.
+pub fn generate_m2m_relationships(
+    table: &TableInfo,
+    schema: &IntrospectedSchema,
+) -> Vec<RelationshipInfo> {
+    let mut rels = Vec::new();
+
+    for assoc_table in &schema.tables {
+        if !is_association_table(assoc_table) {
+            continue;
+        }
+
+        let (t1, t2) = match get_m2m_targets(assoc_table) {
+            Some(targets) => targets,
+            None => continue,
+        };
+
+        // Check if this table is one of the M2M targets
+        if table.name != t1 && table.name != t2 {
+            continue;
+        }
+
+        let other_table = if table.name == t1 { &t2 } else { &t1 };
+        let other_class = table_to_class_name(other_table);
+
+        // Determine the secondary table reference
+        let secondary = if assoc_table.schema != "public" && !assoc_table.schema.is_empty() {
+            format!("{}.{}", assoc_table.schema, assoc_table.name)
+        } else {
+            assoc_table.name.clone()
+        };
+
+        // Derive relationship name from the FK column targeting the other table
+        let rel_name = derive_m2m_rel_name(assoc_table, other_table);
+
+        // back_populates: the other table's relationship name for this table
+        let back_pop = derive_m2m_rel_name(assoc_table, &table.name);
+
+        rels.push(RelationshipInfo {
+            attr_name: rel_name,
+            target_class: other_class,
+            is_collection: true,
+            is_nullable: false,
+            back_populates: back_pop,
+            remote_side: None,
+            foreign_keys: None,
+            uselist_false: false,
+            secondary: Some(secondary),
+        });
+    }
+
+    rels
+}
+
+/// Derive the M2M relationship name from the FK column targeting the OTHER table.
+/// E.g., for LeftTable looking through assoc with left_id/right_id FK columns,
+/// the relationship name is "right" (from right_id pointing to RightTable).
+fn derive_m2m_rel_name(assoc_table: &TableInfo, other_table: &str) -> String {
+    // Find the FK column that points TO other_table
+    for constraint in &assoc_table.constraints {
+        if constraint.constraint_type == ConstraintType::ForeignKey {
+            if let Some(ref fk) = constraint.foreign_key {
+                if fk.ref_table == other_table && constraint.columns.len() == 1 {
+                    return fk_col_to_relationship_name(&constraint.columns[0]);
+                }
+            }
+        }
+    }
+    // Fallback: use the other table name
+    other_table.to_string()
 }
 
 /// Render a relationship line.
@@ -300,6 +433,10 @@ pub fn render_relationship(rel: &RelationshipInfo) -> String {
 
     if let Some(ref rs) = rel.remote_side {
         args.push(format!("remote_side=[{}]", rs));
+    }
+
+    if let Some(ref sec) = rel.secondary {
+        args.push(format!("secondary='{sec}'"));
     }
 
     if let Some(ref fk) = rel.foreign_keys {
