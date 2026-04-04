@@ -189,6 +189,18 @@ fn generate_table(
         }
     }
 
+    // Table comment
+    if !options.nocomments {
+        if let Some(ref comment) = table.comment {
+            // Use double quotes if comment contains single quotes, else single quotes
+            if comment.contains('\'') {
+                body_items.push(format!("comment=\"{comment}\""));
+            } else {
+                body_items.push(format!("comment='{comment}'"));
+            }
+        }
+    }
+
     // Schema (only if not default)
     if table.schema != dialect.default_schema() {
         body_items.push(format!("schema='{}'", table.schema));
@@ -212,39 +224,17 @@ fn generate_table(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::*;
-    use crate::testutil::test_column;
+    use crate::testutil::*;
 
     fn make_simple_schema() -> IntrospectedSchema {
-        IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![TableInfo {
-                schema: "public".to_string(),
-                name: "users".to_string(),
-                table_type: TableType::Table,
-                comment: None,
-                columns: vec![
-                    test_column("id"),
-                    ColumnInfo {
-                        udt_name: "varchar".to_string(),
-                        character_maximum_length: Some(100),
-                        ..test_column("name")
-                    },
-                    ColumnInfo {
-                        is_nullable: true,
-                        udt_name: "text".to_string(),
-                        ..test_column("email")
-                    },
-                ],
-                constraints: vec![ConstraintInfo {
-                    name: "users_pkey".to_string(),
-                    constraint_type: ConstraintType::PrimaryKey,
-                    columns: vec!["id".to_string()],
-                    foreign_key: None,
-                }],
-                indexes: vec![],
-            }],
-        }
+        schema_pg(vec![
+            table("users")
+                .column(col("id").build())
+                .column(col("name").udt("varchar").max_length(100).build())
+                .column(col("email").udt("text").nullable().build())
+                .pk("users_pkey", &["id"])
+                .build(),
+        ])
     }
 
     #[test]
@@ -268,34 +258,19 @@ mod tests {
         insta::assert_yaml_snapshot!(output);
     }
 
+    fn make_no_pk_schema() -> IntrospectedSchema {
+        schema_pg(vec![
+            table("audit_log")
+                .column(col("ts").udt("timestamptz").build())
+                .column(col("action").udt("text").build())
+                .column(col("detail").udt("text").nullable().build())
+                .build(),
+        ])
+    }
+
     #[test]
     fn test_tables_generator_no_pk() {
-        let schema = IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![TableInfo {
-                schema: "public".to_string(),
-                name: "audit_log".to_string(),
-                table_type: TableType::Table,
-                comment: None,
-                columns: vec![
-                    ColumnInfo {
-                        udt_name: "timestamptz".to_string(),
-                        ..test_column("ts")
-                    },
-                    ColumnInfo {
-                        udt_name: "text".to_string(),
-                        ..test_column("action")
-                    },
-                    ColumnInfo {
-                        is_nullable: true,
-                        udt_name: "text".to_string(),
-                        ..test_column("detail")
-                    },
-                ],
-                constraints: vec![],
-                indexes: vec![],
-            }],
-        };
+        let schema = make_no_pk_schema();
         let gen = TablesGenerator;
         let output = gen.generate(&schema, &GeneratorOptions::default());
 
@@ -310,34 +285,212 @@ mod tests {
 
     #[test]
     fn test_tables_generator_no_pk_snapshot() {
-        let schema = IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![TableInfo {
-                schema: "public".to_string(),
-                name: "audit_log".to_string(),
-                table_type: TableType::Table,
-                comment: None,
-                columns: vec![
-                    ColumnInfo {
-                        udt_name: "timestamptz".to_string(),
-                        ..test_column("ts")
-                    },
-                    ColumnInfo {
-                        udt_name: "text".to_string(),
-                        ..test_column("action")
-                    },
-                    ColumnInfo {
-                        is_nullable: true,
-                        udt_name: "text".to_string(),
-                        ..test_column("detail")
-                    },
-                ],
-                constraints: vec![],
-                indexes: vec![],
-            }],
-        };
+        let schema = make_no_pk_schema();
         let gen = TablesGenerator;
         let output = gen.generate(&schema, &GeneratorOptions::default());
         insta::assert_yaml_snapshot!(output);
+    }
+
+    // --- Tier 1: Tests adapted from sqlacodegen test_generator_tables.py ---
+
+    /// Adapted from sqlacodegen test_indexes.
+    /// Tests index rendering in Table() output.
+    #[test]
+    fn test_tables_indexes() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").nullable().build())
+                .column(col("number").nullable().build())
+                .column(col("text").udt("varchar").nullable().build())
+                .index("ix_number", &["number"], false)
+                .index("ix_text_number", &["text", "number"], true)
+                .index("ix_text", &["text"], true)
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('id', Integer)"));
+        assert!(output.contains("Column('number', Integer)"));
+        assert!(output.contains("Column('text', String)"));
+        assert!(output.contains("Index('ix_number', 'number')"));
+        assert!(output.contains("Index('ix_text_number', 'text', 'number', unique=True)"));
+        assert!(output.contains("Index('ix_text', 'text', unique=True)"));
+    }
+
+    /// Adapted from sqlacodegen test_constraints (UniqueConstraint portion).
+    /// Note: CheckConstraint is not yet supported in uvg (Tier 2).
+    #[test]
+    fn test_tables_unique_constraint() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").nullable().build())
+                .column(col("number").nullable().build())
+                .unique("uq_id_number", &["id", "number"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('id', Integer)"));
+        assert!(output.contains("Column('number', Integer)"));
+        assert!(output.contains("UniqueConstraint('id', 'number', name='uq_id_number')"));
+    }
+
+    /// Adapted from sqlacodegen test_table_comment.
+    #[test]
+    fn test_tables_table_comment() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").build())
+                .pk("simple_pkey", &["id"])
+                .comment("this is a 'comment'")
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('id', Integer, primary_key=True)"));
+        assert!(output.contains("comment=\"this is a 'comment'\""));
+    }
+
+    /// Adapted from sqlacodegen test_table_name_identifiers.
+    /// Tests that non-identifier table names are sanitized in variable names.
+    #[test]
+    fn test_tables_table_name_identifiers() {
+        let schema = schema_pg(vec![
+            table("simple-items table")
+                .column(col("id").build())
+                .pk("simple_items_table_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Variable name should sanitize non-identifier chars
+        assert!(output.contains("t_simple_items_table = Table("));
+        // But the table name string should preserve original
+        assert!(output.contains("'simple-items table', metadata,"));
+    }
+
+    /// Adapted from sqlacodegen test_option_noindexes.
+    #[test]
+    fn test_tables_option_noindexes() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("number").nullable().build())
+                .unique("uq_number", &["number"])
+                .index("idx_number", &["number"], false)
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            noindexes: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &opts);
+        assert!(output.contains("Column('number', Integer)"));
+        assert!(output.contains("UniqueConstraint('number', name='uq_number')"));
+        // Index should be suppressed
+        assert!(!output.contains("Index("));
+    }
+
+    /// Adapted from sqlacodegen test_option_noconstraints.
+    #[test]
+    fn test_tables_option_noconstraints() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("number").nullable().build())
+                .unique("uq_number", &["number"])
+                .index("idx_number", &["number"], false)
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            noconstraints: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &opts);
+        assert!(output.contains("Column('number', Integer)"));
+        // Constraint should be suppressed
+        assert!(!output.contains("UniqueConstraint("));
+        // Index should still be present
+        assert!(output.contains("Index('idx_number', 'number')"));
+    }
+
+    /// Adapted from sqlacodegen test_option_nocomments.
+    #[test]
+    fn test_tables_option_nocomments() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").comment("pk column comment").build())
+                .pk("simple_pkey", &["id"])
+                .comment("this is a 'comment'")
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nocomments: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &opts);
+        assert!(output.contains("Column('id', Integer, primary_key=True)"));
+        // Comments should be suppressed
+        assert!(!output.contains("comment="));
+    }
+
+    /// Adapted from sqlacodegen test_schema.
+    #[test]
+    fn test_tables_schema() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .schema("testschema")
+                .column(col("name").udt("varchar").nullable().build())
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("t_simple_items = Table("));
+        assert!(output.contains("Column('name', String)"));
+        assert!(output.contains("schema='testschema'"));
+    }
+
+    /// Adapted from sqlacodegen test_pk_default.
+    #[test]
+    fn test_tables_pk_default() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").default_val("uuid_generate_v4()").build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('id', Integer, primary_key=True, server_default=text('uuid_generate_v4()'))"));
+    }
+
+    /// Adapted from sqlacodegen test_identity_column.
+    #[test]
+    fn test_tables_identity_column() {
+        use crate::schema::IdentityInfo;
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(
+                    col("id")
+                        .identity_info(IdentityInfo {
+                            start: 1,
+                            increment: 2,
+                            min_value: 1,
+                            max_value: 2147483647,
+                            cycle: false,
+                            cache: 1,
+                        })
+                        .build(),
+                )
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Identity("));
+        assert!(output.contains("start=1"));
+        assert!(output.contains("increment=2"));
+        assert!(output.contains("primary_key=True"));
     }
 }

@@ -23,3 +23,4 @@ url = "2"
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
+indoc = "2"

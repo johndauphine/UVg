@@ -122,7 +122,13 @@ fn generate_class(
     // Table-level args (multi-column unique constraints, indexes, comments, schema)
     let table_args = build_table_args(table, imports, options, dialect);
     if let Some(args_str) = table_args {
-        lines.push(format!("    __table_args__ = (\n{args_str}\n    )"));
+        if args_str.starts_with('{') {
+            // Dict-only form
+            lines.push(format!("    __table_args__ = {args_str}"));
+        } else {
+            // Tuple form
+            lines.push(format!("    __table_args__ = (\n{args_str}\n    )"));
+        }
     }
 
     // Blank line before columns
@@ -212,7 +218,11 @@ fn generate_class(
         // Comment
         if !options.nocomments {
             if let Some(ref comment) = col.comment {
-                mc_args.push(format!("comment='{}'", escape_python_string(comment)));
+                if comment.contains('\'') {
+                    mc_args.push(format!("comment=\"{comment}\""));
+                } else {
+                    mc_args.push(format!("comment='{comment}'"));
+                }
             }
         }
 
@@ -252,7 +262,8 @@ fn build_table_args(
     options: &GeneratorOptions,
     dialect: Dialect,
 ) -> Option<String> {
-    let mut args: Vec<String> = Vec::new();
+    let mut positional_args: Vec<String> = Vec::new();
+    let mut kwargs: Vec<String> = Vec::new();
 
     // Foreign key constraints
     if !options.noconstraints {
@@ -267,7 +278,7 @@ fn build_table_args(
                         .iter()
                         .map(|c| format!("'{}.{c}'", fk.ref_table))
                         .collect();
-                    args.push(format!(
+                    positional_args.push(format!(
                         "ForeignKeyConstraint([{}], [{}], name='{}')",
                         local_cols.join(", "),
                         ref_cols.join(", "),
@@ -278,20 +289,8 @@ fn build_table_args(
         }
     }
 
-    // Primary key constraint
-    if !options.noconstraints {
-        for constraint in &table.constraints {
-            if constraint.constraint_type == ConstraintType::PrimaryKey {
-                imports.add("sqlalchemy", "PrimaryKeyConstraint");
-                let cols = quote_constraint_columns(&constraint.columns);
-                args.push(format!(
-                    "PrimaryKeyConstraint({}, name='{}')",
-                    cols.join(", "),
-                    constraint.name
-                ));
-            }
-        }
-    }
+    // Note: PrimaryKeyConstraint is NOT emitted in declarative __table_args__
+    // because it's already expressed via primary_key=True on mapped_column().
 
     // Unique constraints (all, not just multi-column)
     if !options.noconstraints {
@@ -299,7 +298,7 @@ fn build_table_args(
             if constraint.constraint_type == ConstraintType::Unique {
                 imports.add("sqlalchemy", "UniqueConstraint");
                 let cols = quote_constraint_columns(&constraint.columns);
-                args.push(format!(
+                positional_args.push(format!(
                     "UniqueConstraint({}, name='{}')",
                     cols.join(", "),
                     constraint.name
@@ -317,7 +316,7 @@ fn build_table_args(
             imports.add("sqlalchemy", "Index");
             let cols = quote_constraint_columns(&index.columns);
             let unique_str = if index.is_unique { ", unique=True" } else { "" };
-            args.push(format!(
+            positional_args.push(format!(
                 "Index('{}', {}{})",
                 index.name,
                 cols.join(", "),
@@ -326,35 +325,50 @@ fn build_table_args(
         }
     }
 
-    // Table comment
+    // Table comment (kwarg)
     if !options.nocomments {
         if let Some(ref comment) = table.comment {
-            args.push(format!("{{'comment': '{}'}}", escape_python_string(comment)));
+            if comment.contains('\'') {
+                kwargs.push(format!("'comment': \"{}\"", comment));
+            } else {
+                kwargs.push(format!("'comment': '{}'", comment));
+            }
         }
     }
 
-    // Schema (if not default)
+    // Schema (kwarg, if not default)
     if table.schema != dialect.default_schema() {
-        args.push(format!("{{'schema': '{}'}}", table.schema));
+        kwargs.push(format!("'schema': '{}'", table.schema));
     }
 
-    if args.is_empty() {
-        None
-    } else {
-        let last = args.len() - 1;
-        let formatted: Vec<String> = args
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                if i < last {
-                    format!("        {a},")
-                } else {
-                    format!("        {a}")
-                }
-            })
-            .collect();
-        Some(formatted.join("\n"))
+    if positional_args.is_empty() && kwargs.is_empty() {
+        return None;
     }
+
+    // Dict-only form: __table_args__ = {'key': 'value'}
+    if positional_args.is_empty() {
+        let dict_str = format!("{{{}}}", kwargs.join(", "));
+        return Some(dict_str);
+    }
+
+    // Tuple form: if kwargs exist, append dict as last item
+    if !kwargs.is_empty() {
+        positional_args.push(format!("{{{}}}", kwargs.join(", ")));
+    }
+
+    let last = positional_args.len() - 1;
+    let formatted: Vec<String> = positional_args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            if i < last {
+                format!("        {a},")
+            } else {
+                format!("        {a}")
+            }
+        })
+        .collect();
+    Some(formatted.join("\n"))
 }
 
 /// Generate a Table() assignment for a table without a primary key.
@@ -509,103 +523,28 @@ fn generate_table_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::*;
-    use crate::testutil::test_column;
+    use crate::testutil::*;
 
     fn make_simple_schema() -> IntrospectedSchema {
-        IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![
-                TableInfo {
-                    schema: "public".to_string(),
-                    name: "users".to_string(),
-                    table_type: TableType::Table,
-                    comment: None,
-                    columns: vec![
-                        test_column("id"),
-                        ColumnInfo {
-                            udt_name: "varchar".to_string(),
-                            character_maximum_length: Some(100),
-                            ..test_column("name")
-                        },
-                        ColumnInfo {
-                            udt_name: "varchar".to_string(),
-                            character_maximum_length: Some(255),
-                            ..test_column("email")
-                        },
-                        ColumnInfo {
-                            is_nullable: true,
-                            udt_name: "text".to_string(),
-                            ..test_column("bio")
-                        },
-                        ColumnInfo {
-                            is_nullable: true,
-                            udt_name: "timestamptz".to_string(),
-                            column_default: Some("now()".to_string()),
-                            ..test_column("created_at")
-                        },
-                    ],
-                    constraints: vec![
-                        ConstraintInfo {
-                            name: "users_pkey".to_string(),
-                            constraint_type: ConstraintType::PrimaryKey,
-                            columns: vec!["id".to_string()],
-                            foreign_key: None,
-                        },
-                        ConstraintInfo {
-                            name: "users_email_key".to_string(),
-                            constraint_type: ConstraintType::Unique,
-                            columns: vec!["email".to_string()],
-                            foreign_key: None,
-                        },
-                    ],
-                    indexes: vec![],
-                },
-                TableInfo {
-                    schema: "public".to_string(),
-                    name: "posts".to_string(),
-                    table_type: TableType::Table,
-                    comment: None,
-                    columns: vec![
-                        ColumnInfo {
-                            udt_name: "int8".to_string(),
-                            ..test_column("id")
-                        },
-                        test_column("user_id"),
-                        ColumnInfo {
-                            udt_name: "varchar".to_string(),
-                            character_maximum_length: Some(200),
-                            ..test_column("title")
-                        },
-                        ColumnInfo {
-                            udt_name: "text".to_string(),
-                            ..test_column("body")
-                        },
-                    ],
-                    constraints: vec![
-                        ConstraintInfo {
-                            name: "posts_pkey".to_string(),
-                            constraint_type: ConstraintType::PrimaryKey,
-                            columns: vec!["id".to_string()],
-                            foreign_key: None,
-                        },
-                        ConstraintInfo {
-                            name: "posts_user_id_fkey".to_string(),
-                            constraint_type: ConstraintType::ForeignKey,
-                            columns: vec!["user_id".to_string()],
-                            foreign_key: Some(ForeignKeyInfo {
-                                ref_schema: "public".to_string(),
-                                ref_table: "users".to_string(),
-                                ref_columns: vec!["id".to_string()],
-                                update_rule: "NO ACTION".to_string(),
-                                delete_rule: "NO ACTION".to_string(),
-                            }),
-                        },
-                    ],
-                    indexes: vec![],
-                },
-            ],
-        }
+        schema_pg(vec![
+            table("users")
+                .column(col("id").build())
+                .column(col("name").udt("varchar").max_length(100).build())
+                .column(col("email").udt("varchar").max_length(255).build())
+                .column(col("bio").udt("text").nullable().build())
+                .column(col("created_at").udt("timestamptz").nullable().default_val("now()").build())
+                .pk("users_pkey", &["id"])
+                .unique("users_email_key", &["email"])
+                .build(),
+            table("posts")
+                .column(col("id").udt("int8").build())
+                .column(col("user_id").build())
+                .column(col("title").udt("varchar").max_length(200).build())
+                .column(col("body").udt("text").build())
+                .pk("posts_pkey", &["id"])
+                .fk("posts_user_id_fkey", &["user_id"], "users", &["id"])
+                .build(),
+        ])
     }
 
     #[test]
@@ -615,7 +554,8 @@ mod tests {
         let output = gen.generate(&schema, &GeneratorOptions::default());
         assert!(output.contains("class Users(Base):"));
         assert!(output.contains("__tablename__ = 'users'"));
-        assert!(output.contains("PrimaryKeyConstraint('id', name='users_pkey'),"));
+        // PrimaryKeyConstraint is NOT in __table_args__ for declarative mode
+        assert!(!output.contains("PrimaryKeyConstraint"));
         assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
         assert!(output.contains("name: Mapped[str] = mapped_column(String(100), nullable=False)"));
         assert!(output.contains("email: Mapped[str] = mapped_column(String(255), nullable=False)"));
@@ -635,57 +575,19 @@ mod tests {
         insta::assert_yaml_snapshot!(output);
     }
 
-    /// Schema with a mix: one table with PK (users), one without (audit_log).
     fn make_mixed_pk_schema() -> IntrospectedSchema {
-        IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![
-                TableInfo {
-                    schema: "public".to_string(),
-                    name: "users".to_string(),
-                    table_type: TableType::Table,
-                    comment: None,
-                    columns: vec![
-                        test_column("id"),
-                        ColumnInfo {
-                            udt_name: "varchar".to_string(),
-                            character_maximum_length: Some(100),
-                            ..test_column("name")
-                        },
-                    ],
-                    constraints: vec![ConstraintInfo {
-                        name: "users_pkey".to_string(),
-                        constraint_type: ConstraintType::PrimaryKey,
-                        columns: vec!["id".to_string()],
-                        foreign_key: None,
-                    }],
-                    indexes: vec![],
-                },
-                TableInfo {
-                    schema: "public".to_string(),
-                    name: "audit_log".to_string(),
-                    table_type: TableType::Table,
-                    comment: None,
-                    columns: vec![
-                        ColumnInfo {
-                            udt_name: "timestamptz".to_string(),
-                            ..test_column("ts")
-                        },
-                        ColumnInfo {
-                            udt_name: "text".to_string(),
-                            ..test_column("action")
-                        },
-                        ColumnInfo {
-                            is_nullable: true,
-                            udt_name: "text".to_string(),
-                            ..test_column("detail")
-                        },
-                    ],
-                    constraints: vec![],
-                    indexes: vec![],
-                },
-            ],
-        }
+        schema_pg(vec![
+            table("users")
+                .column(col("id").build())
+                .column(col("name").udt("varchar").max_length(100).build())
+                .pk("users_pkey", &["id"])
+                .build(),
+            table("audit_log")
+                .column(col("ts").udt("timestamptz").build())
+                .column(col("action").udt("text").build())
+                .column(col("detail").udt("text").nullable().build())
+                .build(),
+        ])
     }
 
     #[test]
@@ -724,27 +626,12 @@ mod tests {
 
     #[test]
     fn test_declarative_all_no_pk() {
-        let schema = IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![TableInfo {
-                schema: "public".to_string(),
-                name: "events".to_string(),
-                table_type: TableType::Table,
-                comment: None,
-                columns: vec![
-                    ColumnInfo {
-                        udt_name: "timestamptz".to_string(),
-                        ..test_column("ts")
-                    },
-                    ColumnInfo {
-                        udt_name: "text".to_string(),
-                        ..test_column("data")
-                    },
-                ],
-                constraints: vec![],
-                indexes: vec![],
-            }],
-        };
+        let schema = schema_pg(vec![
+            table("events")
+                .column(col("ts").udt("timestamptz").build())
+                .column(col("data").udt("text").build())
+                .build(),
+        ]);
         let gen = DeclarativeGenerator;
         let output = gen.generate(&schema, &GeneratorOptions::default());
 
@@ -765,29 +652,192 @@ mod tests {
 
     #[test]
     fn test_declarative_all_no_pk_snapshot() {
-        let schema = IntrospectedSchema {
-            dialect: Dialect::Postgres,
-            tables: vec![TableInfo {
-                schema: "public".to_string(),
-                name: "events".to_string(),
-                table_type: TableType::Table,
-                comment: None,
-                columns: vec![
-                    ColumnInfo {
-                        udt_name: "timestamptz".to_string(),
-                        ..test_column("ts")
-                    },
-                    ColumnInfo {
-                        udt_name: "text".to_string(),
-                        ..test_column("data")
-                    },
-                ],
-                constraints: vec![],
-                indexes: vec![],
-            }],
-        };
+        let schema = schema_pg(vec![
+            table("events")
+                .column(col("ts").udt("timestamptz").build())
+                .column(col("data").udt("text").build())
+                .build(),
+        ]);
         let gen = DeclarativeGenerator;
         let output = gen.generate(&schema, &GeneratorOptions::default());
         insta::assert_yaml_snapshot!(output);
+    }
+
+    // --- Tier 1: Tests adapted from sqlacodegen test_generator_declarative.py ---
+
+    /// Adapted from sqlacodegen test_indexes.
+    #[test]
+    fn test_declarative_indexes() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("number").nullable().build())
+                .column(col("text").udt("varchar").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .index("idx_number", &["number"], false)
+                .index("idx_text", &["text"], true)
+                .index("idx_text_number", &["text", "number"], false)
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("class SimpleItems(Base):"));
+        assert!(output.contains("__table_args__ = ("));
+        assert!(output.contains("Index('idx_number', 'number')"));
+        assert!(output.contains("Index('idx_text', 'text', unique=True)"));
+        assert!(output.contains("Index('idx_text_number', 'text', 'number')"));
+        assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
+        assert!(output.contains("number: Mapped[Optional[int]] = mapped_column(Integer)"));
+        assert!(output.contains("text: Mapped[Optional[str]] = mapped_column(String)"));
+    }
+
+    /// Adapted from sqlacodegen test_table_kwargs.
+    /// Tests dict-only __table_args__ for schema.
+    #[test]
+    fn test_declarative_table_kwargs() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .schema("testschema")
+                .column(col("id").build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("class SimpleItems(Base):"));
+        assert!(output.contains("__table_args__ = {'schema': 'testschema'}"));
+        assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
+    }
+
+    /// Adapted from sqlacodegen test_table_args_kwargs.
+    /// Tests mixed tuple+dict __table_args__.
+    #[test]
+    fn test_declarative_table_args_kwargs() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .schema("testschema")
+                .column(col("id").build())
+                .column(col("name").udt("varchar").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .index("testidx", &["id", "name"], false)
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("__table_args__ = ("));
+        assert!(output.contains("Index('testidx', 'id', 'name'),"));
+        assert!(output.contains("{'schema': 'testschema'}"));
+    }
+
+    /// Adapted from sqlacodegen test_only_tables (all no-PK fallback).
+    #[test]
+    fn test_declarative_only_tables() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").nullable().build())
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("metadata = MetaData()"));
+        assert!(output.contains("t_simple_items = Table("));
+        assert!(!output.contains("class "));
+        assert!(!output.contains("DeclarativeBase"));
+    }
+
+    /// Adapted from sqlacodegen test_column_comment (without nocomments).
+    #[test]
+    fn test_declarative_column_comment() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").comment("this is a 'comment'").build())
+                .pk("simple_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True, comment=\"this is a 'comment'\")"));
+    }
+
+    /// Adapted from sqlacodegen test_column_comment with nocomments option.
+    #[test]
+    fn test_declarative_column_comment_nocomments() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").comment("this is a 'comment'").build())
+                .pk("simple_pkey", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nocomments: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
+        assert!(!output.contains("comment="));
+    }
+
+    /// Adapted from sqlacodegen test_table_comment (declarative).
+    #[test]
+    fn test_declarative_table_comment() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").build())
+                .pk("simple_pkey", &["id"])
+                .comment("this is a 'comment'")
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("__table_args__ = {'comment': \"this is a 'comment'\"}"));
+    }
+
+    /// Adapted from sqlacodegen test_pascal.
+    #[test]
+    fn test_declarative_pascal() {
+        // Note: sqlacodegen preserves "CustomerAPIPreference" as-is for the class name.
+        // heck's to_upper_camel_case normalizes to "CustomerApiPreference".
+        // This is a known difference (consecutive uppercase letters are lowercased by heck).
+        let schema = schema_pg(vec![
+            table("CustomerAPIPreference")
+                .column(col("id").build())
+                .pk("customer_api_preference_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("class CustomerApiPreference(Base):"));
+        assert!(output.contains("__tablename__ = 'CustomerAPIPreference'"));
+    }
+
+    /// Adapted from sqlacodegen test_underscore.
+    #[test]
+    fn test_declarative_underscore() {
+        let schema = schema_pg(vec![
+            table("customer_api_preference")
+                .column(col("id").build())
+                .pk("customer_api_preference_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("class CustomerApiPreference(Base):"));
+        assert!(output.contains("__tablename__ = 'customer_api_preference'"));
+    }
+
+    /// Adapted from sqlacodegen test_pascal_multiple_underscore.
+    #[test]
+    fn test_declarative_pascal_multiple_underscore() {
+        let schema = schema_pg(vec![
+            table("customer_API__Preference")
+                .column(col("id").build())
+                .pk("customer_api_preference_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // heck's UpperCamelCase handling of double underscores
+        assert!(output.contains("__tablename__ = 'customer_API__Preference'"));
     }
 }

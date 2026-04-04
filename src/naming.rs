@@ -6,8 +6,13 @@ pub fn table_to_class_name(table_name: &str) -> String {
 }
 
 /// Convert a table name to a variable name for the tables generator (e.g. "users" -> "t_users").
+/// Non-identifier characters (hyphens, spaces, etc.) are replaced with underscores.
 pub fn table_to_variable_name(table_name: &str) -> String {
-    format!("t_{table_name}")
+    let sanitized: String = table_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    format!("t_{sanitized}")
 }
 
 #[cfg(test)]
