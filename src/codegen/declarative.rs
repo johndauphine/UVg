@@ -52,7 +52,7 @@ impl Generator for DeclarativeGenerator {
             // Track enum usage
             for col_info in &table.columns {
                 if let Some(ei) = find_enum_for_column(&col_info.udt_name, &schema.enums) {
-                    if !used_enums.iter().any(|e| e.name == ei.name) {
+                    if !used_enums.iter().any(|e| e.schema == ei.schema && e.name == ei.name) {
                         used_enums.push(ei);
                     }
                 }
@@ -194,10 +194,17 @@ fn generate_class(
         let enum_info = find_enum_for_column(&col.udt_name, &schema.enums);
         let (sa_type_str, python_type) = if let Some(ei) = enum_info {
             let cls = enum_class_name(&ei.name);
-            let sa = format!(
-                "Enum({cls}, values_callable=lambda cls: [member.value for member in cls], name='{}')",
-                ei.name
-            );
+            let mut enum_parts = vec![
+                cls.clone(),
+                "values_callable=lambda cls: [member.value for member in cls]".to_string(),
+                format!("name={}", format_python_string_literal(&ei.name)),
+            ];
+            if let Some(ref sch) = ei.schema {
+                if !sch.is_empty() {
+                    enum_parts.push(format!("schema={}", format_python_string_literal(sch)));
+                }
+            }
+            let sa = format!("Enum({})", enum_parts.join(", "));
             (sa, cls)
         } else {
             let mapped = map_column_type(col, dialect);

@@ -155,8 +155,19 @@ pub fn generate_enum_class(enum_info: &crate::schema::EnumInfo) -> String {
     let mut lines = Vec::new();
     lines.push(format!("class {class_name}(str, enum.Enum):"));
     for value in &enum_info.values {
-        let member_name = value.to_uppercase();
-        lines.push(format!("    {member_name} = '{value}'"));
+        // Sanitize member name: uppercase, replace non-identifier chars, prefix if starts with digit
+        let mut member_name: String = value
+            .to_uppercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        if member_name.starts_with(|c: char| c.is_ascii_digit()) {
+            member_name = format!("_{member_name}");
+        }
+        if member_name.is_empty() {
+            member_name = "_".to_string();
+        }
+        lines.push(format!("    {member_name} = {}", format_python_string_literal(value)));
     }
     lines.join("\n")
 }

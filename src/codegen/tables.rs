@@ -31,7 +31,7 @@ impl Generator for TablesGenerator {
             // Track which enums are referenced
             for col in &table.columns {
                 if let Some(ei) = find_enum_for_column(&col.udt_name, &schema.enums) {
-                    if !used_enums.iter().any(|e| e.name == ei.name) {
+                    if !used_enums.iter().any(|e| e.schema == ei.schema && e.name == ei.name) {
                         used_enums.push(ei);
                     }
                 }
@@ -89,11 +89,19 @@ fn generate_table(
         // Check if column type is a named enum
         if let Some(ei) = find_enum_for_column(&col.udt_name, enums) {
             let cls = enum_class_name(&ei.name);
-            let mut enum_args = format!("{cls}, values_callable=lambda cls: [member.value for member in cls]");
+            let mut enum_parts = vec![
+                cls,
+                "values_callable=lambda cls: [member.value for member in cls]".to_string(),
+            ];
             if !ei.name.is_empty() {
-                enum_args.push_str(&format!(", name='{}'", ei.name));
+                enum_parts.push(format!("name={}", format_python_string_literal(&ei.name)));
             }
-            col_args.push(format!("Enum({enum_args})"));
+            if let Some(ref schema) = ei.schema {
+                if !schema.is_empty() {
+                    enum_parts.push(format!("schema={}", format_python_string_literal(schema)));
+                }
+            }
+            col_args.push(format!("Enum({})", enum_parts.join(", ")));
         } else {
             let mapped = map_column_type(col, dialect);
             imports.add(&mapped.import_module, &mapped.import_name);
