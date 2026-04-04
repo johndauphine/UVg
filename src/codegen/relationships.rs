@@ -106,6 +106,7 @@ pub fn generate_child_relationships(
 
             if is_selfref {
                 let reverse_name = format!("{rel_name}_reverse");
+                let ref_col = &fk.ref_columns[0];
 
                 rels.push(RelationshipInfo {
                     attr_name: rel_name.clone(),
@@ -113,7 +114,7 @@ pub fn generate_child_relationships(
                     is_collection: false,
                     is_nullable,
                     back_populates: reverse_name.clone(),
-                    remote_side: Some("id".to_string()),
+                    remote_side: Some(ref_col.to_string()),
                     foreign_keys: if multi_ref {
                         Some(format!("[{col_name}]"))
                     } else {

@@ -202,7 +202,11 @@ fn generate_class(
         }
 
         // Check for single-column FK — use ForeignKey() instead of type
-        let inline_fk = find_inline_fk(&col.name, &table.constraints);
+        let inline_fk = if !options.noconstraints {
+            find_inline_fk(&col.name, &table.constraints)
+        } else {
+            None
+        };
         if let Some(fk_constraint) = inline_fk {
             if let Some(ref fk) = fk_constraint.foreign_key {
                 imports.add("sqlalchemy", "ForeignKey");
@@ -297,9 +301,15 @@ fn generate_class(
         lines.push(col_line.line.clone());
     }
 
-    // Relationships
-    let parent_rels = generate_parent_relationships(table, schema);
-    let child_rels = generate_child_relationships(table, schema);
+    // Relationships (suppressed when noconstraints)
+    let (parent_rels, child_rels) = if !options.noconstraints {
+        (
+            generate_parent_relationships(table, schema),
+            generate_child_relationships(table, schema),
+        )
+    } else {
+        (vec![], vec![])
+    };
 
     if !parent_rels.is_empty() || !child_rels.is_empty() {
         imports.add("sqlalchemy.orm", "relationship");
