@@ -360,22 +360,25 @@ fn generate_class(
     }
 
     // Relationships (suppressed when noconstraints)
-    let (parent_rels, mut child_rels, m2m_rels) = if !options.noconstraints {
+    let (parent_rels, mut child_rels, mut m2m_rels) = if !options.noconstraints {
         let parent = if !options.nobidi {
             generate_parent_relationships(table, schema)
         } else {
             vec![]
         };
         let child = generate_child_relationships(table, schema);
-        let m2m = generate_m2m_relationships(table, schema);
+        let m2m = generate_m2m_relationships(table, schema, dialect.default_schema());
         (parent, child, m2m)
     } else {
         (vec![], vec![], vec![])
     };
 
-    // When nobidi, strip back_populates from child relationships
+    // When nobidi, strip back_populates from child and M2M relationships
     if options.nobidi {
         for rel in &mut child_rels {
+            rel.back_populates.clear();
+        }
+        for rel in &mut m2m_rels {
             rel.back_populates.clear();
         }
     }

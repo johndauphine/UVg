@@ -88,6 +88,11 @@ pub fn generate_child_relationships(
 
     // Check if this table uses inheritance (skip the inheritance FK for relationships)
     let inheritance_parent = find_inheritance_parent(table, _schema);
+    let pk_col_name = table
+        .constraints
+        .iter()
+        .find(|c| c.constraint_type == ConstraintType::PrimaryKey)
+        .and_then(|pk| pk.columns.first().cloned());
 
     for constraint in &fk_constraints {
         let fk = match &constraint.foreign_key {
@@ -95,10 +100,12 @@ pub fn generate_child_relationships(
             None => continue,
         };
 
-        // Skip inheritance FK — it's rendered as ForeignKey on mapped_column, not as a relationship
+        // Skip inheritance FK — it's rendered as ForeignKey on mapped_column, not as a relationship.
+        // Only skip the FK where the local column IS the table's PK column.
         if inheritance_parent.is_some()
             && is_single_column_fk(constraint)
             && fk.ref_table == inheritance_parent.unwrap()
+            && pk_col_name.as_deref() == Some(&constraint.columns[0])
         {
             continue;
         }
@@ -312,12 +319,12 @@ pub fn generate_parent_relationships(
 }
 
 /// Check if a table is a many-to-many association table.
-/// An association table has exactly 2 FKs and no columns that aren't part of those FKs.
+/// An association table has exactly 2 single-column FKs and no columns that aren't part of those FKs.
 pub fn is_association_table(table: &TableInfo) -> bool {
     let fk_constraints: Vec<&ConstraintInfo> = table
         .constraints
         .iter()
-        .filter(|c| c.constraint_type == ConstraintType::ForeignKey)
+        .filter(|c| c.constraint_type == ConstraintType::ForeignKey && is_single_column_fk(c))
         .collect();
 
     if fk_constraints.len() != 2 {
@@ -362,6 +369,7 @@ pub fn get_m2m_targets(assoc_table: &TableInfo) -> Option<(String, String)> {
 pub fn generate_m2m_relationships(
     table: &TableInfo,
     schema: &IntrospectedSchema,
+    default_schema: &str,
 ) -> Vec<RelationshipInfo> {
     let mut rels = Vec::new();
 
@@ -384,7 +392,7 @@ pub fn generate_m2m_relationships(
         let other_class = table_to_class_name(other_table);
 
         // Determine the secondary table reference
-        let secondary = if assoc_table.schema != "public" && !assoc_table.schema.is_empty() {
+        let secondary = if assoc_table.schema != default_schema && !assoc_table.schema.is_empty() {
             format!("{}.{}", assoc_table.schema, assoc_table.name)
         } else {
             assoc_table.name.clone()
@@ -457,18 +465,22 @@ pub fn find_inheritance_parent<'a>(
 
     let fk_info = fk.foreign_key.as_ref()?;
 
+    // Require single ref_column on FK
+    if fk_info.ref_columns.len() != 1 {
+        return None;
+    }
+
     // Verify the target is a PK in the parent table
-    let parent = schema
-        .tables
-        .iter()
-        .find(|t| t.name == fk_info.ref_table)?;
+    let parent = schema.tables.iter().find(|t| {
+        t.name == fk_info.ref_table && t.schema == fk_info.ref_schema
+    })?;
 
     let parent_pk = parent
         .constraints
         .iter()
         .find(|c| c.constraint_type == ConstraintType::PrimaryKey)?;
 
-    if parent_pk.columns.contains(&fk_info.ref_columns[0]) {
+    if parent_pk.columns.len() == 1 && parent_pk.columns[0] == fk_info.ref_columns[0] {
         Some(&parent.name)
     } else {
         None

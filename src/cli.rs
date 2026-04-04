@@ -27,7 +27,7 @@ pub struct Cli {
     #[arg(long)]
     pub noviews: bool,
 
-    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments
+    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments, nobidi, nofknames, noidsuffix
     #[arg(long)]
     pub options: Option<String>,
 
@@ -97,6 +97,9 @@ impl Cli {
                     "noindexes" => opts.noindexes = true,
                     "noconstraints" => opts.noconstraints = true,
                     "nocomments" => opts.nocomments = true,
+                    "nobidi" => opts.nobidi = true,
+                    "nofknames" => opts.nofknames = true,
+                    "noidsuffix" => opts.noidsuffix = true,
                     _ => tracing::warn!("Unknown generator option: {}", opt),
                 }
             }
