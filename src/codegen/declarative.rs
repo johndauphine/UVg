@@ -1,8 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::relationships::{
-    find_inline_fk, generate_child_relationships, generate_parent_relationships,
-    has_unique_constraint, render_relationship,
+    find_inheritance_parent, find_inline_fk, generate_child_relationships,
+    generate_m2m_relationships, generate_parent_relationships, has_unique_constraint,
+    is_association_table, render_relationship,
 };
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
@@ -58,7 +59,11 @@ impl Generator for DeclarativeGenerator {
                 }
             }
 
-            if has_primary_key(&table.constraints) {
+            if is_association_table(table) {
+                // M2M association table: render as Table() with ForeignKey on columns
+                let block = generate_association_table(table, &mut imports, options, schema.dialect, metadata_ref);
+                blocks.push(block);
+            } else if has_primary_key(&table.constraints) {
                 let (block, meta) = generate_class(table, &mut imports, options, schema.dialect, schema);
                 if meta.needs_optional {
                     needs_optional = true;
@@ -145,7 +150,15 @@ fn generate_class(
         needs_uuid: false,
     };
 
-    lines.push(format!("class {class_name}(Base):"));
+    // Check for joined table inheritance
+    let parent_table_name = find_inheritance_parent(table, schema);
+    let base_class = if let Some(parent_name) = parent_table_name {
+        table_to_class_name(parent_name)
+    } else {
+        "Base".to_string()
+    };
+
+    lines.push(format!("class {class_name}({base_class}):"));
     lines.push(format!("    __tablename__ = '{}'", table.name));
 
     // Table-level args (multi-column unique constraints, indexes, comments, schema)
@@ -251,7 +264,11 @@ fn generate_class(
         if let Some(fk_constraint) = inline_fk {
             if let Some(ref fk) = fk_constraint.foreign_key {
                 imports.add("sqlalchemy", "ForeignKey");
-                let target = format!("'{}.{}'", fk.ref_table, fk.ref_columns[0]);
+                let target = if fk.ref_schema != dialect.default_schema() {
+                    format!("'{}.{}.{}'", fk.ref_schema, fk.ref_table, fk.ref_columns[0])
+                } else {
+                    format!("'{}.{}'", fk.ref_table, fk.ref_columns[0])
+                };
                 mc_args.push(format!("ForeignKey({target})"));
             }
             // unique=True if FK column has a unique constraint (one-to-one)
@@ -343,20 +360,35 @@ fn generate_class(
     }
 
     // Relationships (suppressed when noconstraints)
-    let (parent_rels, child_rels) = if !options.noconstraints {
-        (
-            generate_parent_relationships(table, schema),
-            generate_child_relationships(table, schema),
-        )
+    let (parent_rels, mut child_rels, mut m2m_rels) = if !options.noconstraints {
+        let parent = if !options.nobidi {
+            generate_parent_relationships(table, schema)
+        } else {
+            vec![]
+        };
+        let child = generate_child_relationships(table, schema);
+        let m2m = generate_m2m_relationships(table, schema, dialect.default_schema());
+        (parent, child, m2m)
     } else {
-        (vec![], vec![])
+        (vec![], vec![], vec![])
     };
 
-    if !parent_rels.is_empty() || !child_rels.is_empty() {
+    // When nobidi, strip back_populates from child and M2M relationships
+    if options.nobidi {
+        for rel in &mut child_rels {
+            rel.back_populates.clear();
+        }
+        for rel in &mut m2m_rels {
+            rel.back_populates.clear();
+        }
+    }
+
+    let all_rels_empty = parent_rels.is_empty() && child_rels.is_empty() && m2m_rels.is_empty();
+    if !all_rels_empty {
         imports.add("sqlalchemy.orm", "relationship");
         lines.push(String::new()); // blank line before relationships
 
-        for rel in parent_rels.iter().chain(child_rels.iter()) {
+        for rel in parent_rels.iter().chain(m2m_rels.iter()).chain(child_rels.iter()) {
             if rel.is_nullable && !rel.is_collection {
                 meta.needs_optional = true;
             }
@@ -524,6 +556,61 @@ fn build_table_args(
 
 /// Generate a Table() assignment for a table without a primary key.
 /// Uses the provided `metadata_ref` (e.g. `Base.metadata` or standalone `metadata`) as the metadata reference.
+/// Generate a Table() for M2M association tables.
+/// Columns use ForeignKey() inline (not ForeignKeyConstraint).
+fn generate_association_table(
+    table: &TableInfo,
+    imports: &mut ImportCollector,
+    options: &GeneratorOptions,
+    dialect: Dialect,
+    metadata_ref: &str,
+) -> String {
+    let var_name = table_to_variable_name(&table.name);
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("{var_name} = Table("));
+    lines.push(format!("    '{}', {metadata_ref},", table.name));
+
+    let mut body_items: Vec<String> = Vec::new();
+
+    for col_info in &table.columns {
+        // Find FK for this column
+        let fk = find_inline_fk(&col_info.name, &table.constraints);
+        if let Some(fk_constraint) = fk {
+            if let Some(ref fk_info) = fk_constraint.foreign_key {
+                imports.add("sqlalchemy", "ForeignKey");
+                let target = if fk_info.ref_schema != dialect.default_schema() {
+                    format!("{}.{}.{}", fk_info.ref_schema, fk_info.ref_table, fk_info.ref_columns[0])
+                } else {
+                    format!("{}.{}", fk_info.ref_table, fk_info.ref_columns[0])
+                };
+                body_items.push(format!("Column('{}', ForeignKey('{}'))", col_info.name, target));
+            }
+        } else {
+            let mapped = map_column_type(col_info, dialect);
+            imports.add(&mapped.import_module, &mapped.import_name);
+            body_items.push(format!("Column('{}', {})", col_info.name, mapped.sa_type));
+        }
+    }
+
+    // Schema (only if not default)
+    if table.schema != dialect.default_schema() {
+        body_items.push(format!("schema='{}'", table.schema));
+    }
+
+    let last = body_items.len().saturating_sub(1);
+    for (i, item) in body_items.iter().enumerate() {
+        if i < last {
+            lines.push(format!("    {item},"));
+        } else {
+            lines.push(format!("    {item}"));
+        }
+    }
+
+    lines.push(")".to_string());
+    lines.join("\n")
+}
+
 fn generate_table_fallback(
     table: &TableInfo,
     imports: &mut ImportCollector,
@@ -1333,5 +1420,198 @@ mod tests {
         // import enum
         assert!(output.contains("import enum"));
         assert!(output.contains("Enum"));
+    }
+
+    // --- PR 5: Advanced relationship tests ---
+
+    /// Adapted from sqlacodegen test_onetomany_multiref.
+    /// Two FKs from child to same parent — needs disambiguation.
+    #[test]
+    fn test_declarative_onetomany_multiref() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("parent_container_id").nullable().build())
+                .column(col("top_container_id").build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_parent_fkey", &["parent_container_id"], "simple_containers", &["id"])
+                .fk("si_top_fkey", &["top_container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Parent side: disambiguated relationship names
+        assert!(output.contains("simple_items_parent_container: Mapped[list['SimpleItems']]"));
+        assert!(output.contains("simple_items_top_container: Mapped[list['SimpleItems']]"));
+        // Child side: foreign_keys disambiguation
+        assert!(output.contains("parent_container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers', foreign_keys=[parent_container_id], back_populates='simple_items_parent_container')"));
+        assert!(output.contains("top_container: Mapped['SimpleContainers'] = relationship('SimpleContainers', foreign_keys=[top_container_id], back_populates='simple_items_top_container')"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_selfref_multi.
+    #[test]
+    fn test_declarative_onetomany_selfref_multi() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("parent_item_id").nullable().build())
+                .column(col("top_item_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_parent_fkey", &["parent_item_id"], "simple_items", &["id"])
+                .fk("si_top_fkey", &["top_item_id"], "simple_items", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Each self-ref FK gets foreign_keys disambiguation
+        assert!(output.contains("parent_item: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', remote_side=[id], foreign_keys=[parent_item_id], back_populates='parent_item_reverse')"));
+        assert!(output.contains("top_item: Mapped[Optional['SimpleItems']] = relationship('SimpleItems', remote_side=[id], foreign_keys=[top_item_id], back_populates='top_item_reverse')"));
+    }
+
+    /// Adapted from sqlacodegen test_manytoone_nobidi.
+    #[test]
+    fn test_declarative_manytoone_nobidi() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_container_fkey", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nobidi: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+
+        // Child has relationship without back_populates
+        assert!(output.contains("container: Mapped[Optional['SimpleContainers']] = relationship('SimpleContainers')"));
+        // Parent should NOT have reverse relationship
+        assert!(!output.contains("simple_items: Mapped[list"));
+    }
+
+    /// Adapted from sqlacodegen test_foreign_key_schema.
+    #[test]
+    fn test_declarative_foreign_key_schema() {
+        let schema = schema_pg(vec![
+            table("other_items")
+                .schema("otherschema")
+                .column(col("id").build())
+                .pk("other_items_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("other_item_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk_full(
+                    "si_other_fkey",
+                    &["other_item_id"],
+                    "otherschema",
+                    "other_items",
+                    &["id"],
+                    "NO ACTION",
+                    "NO ACTION",
+                )
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // FK target includes schema prefix
+        assert!(output.contains("ForeignKey('otherschema.other_items.id')"));
+        // Parent table has schema in __table_args__
+        assert!(output.contains("__table_args__ = {'schema': 'otherschema'}"));
+    }
+
+    /// Adapted from sqlacodegen test_manytomany.
+    #[test]
+    fn test_declarative_manytomany() {
+        let schema = schema_pg(vec![
+            table("left_table")
+                .column(col("id").build())
+                .pk("left_table_pkey", &["id"])
+                .build(),
+            table("right_table")
+                .column(col("id").build())
+                .pk("right_table_pkey", &["id"])
+                .build(),
+            table("association_table")
+                .column(col("left_id").nullable().build())
+                .column(col("right_id").nullable().build())
+                .fk("assoc_left_fkey", &["left_id"], "left_table", &["id"])
+                .fk("assoc_right_fkey", &["right_id"], "right_table", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Association table rendered as Table()
+        assert!(output.contains("t_association_table = Table("));
+        assert!(output.contains("Column('left_id', ForeignKey('left_table.id'))"));
+        assert!(output.contains("Column('right_id', ForeignKey('right_table.id'))"));
+
+        // Left table gets M2M relationship to right
+        assert!(output.contains("right: Mapped[list['RightTable']] = relationship('RightTable', secondary='association_table', back_populates='left')"));
+        // Right table gets M2M relationship to left
+        assert!(output.contains("left: Mapped[list['LeftTable']] = relationship('LeftTable', secondary='association_table', back_populates='right')"));
+
+        // No class for association table
+        assert!(!output.contains("class AssociationTable"));
+    }
+
+    /// Adapted from sqlacodegen test_joined_inheritance.
+    #[test]
+    fn test_declarative_joined_inheritance() {
+        let schema = schema_pg(vec![
+            table("simple_super_items")
+                .column(col("id").build())
+                .column(col("data1").nullable().build())
+                .pk("simple_super_items_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("super_item_id").build())
+                .column(col("data2").nullable().build())
+                .pk("simple_items_pkey", &["super_item_id"])
+                .fk("si_super_fkey", &["super_item_id"], "simple_super_items", &["id"])
+                .build(),
+            table("simple_sub_items")
+                .column(col("simple_items_id").build())
+                .column(col("data3").nullable().build())
+                .pk("simple_sub_items_pkey", &["simple_items_id"])
+                .fk("ssi_items_fkey", &["simple_items_id"], "simple_items", &["super_item_id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+
+        // Parent class
+        assert!(output.contains("class SimpleSuperItems(Base):"));
+        assert!(output.contains("id: Mapped[int] = mapped_column(Integer, primary_key=True)"));
+        assert!(output.contains("data1: Mapped[Optional[int]] = mapped_column(Integer)"));
+
+        // Child inherits from parent
+        assert!(output.contains("class SimpleItems(SimpleSuperItems):"));
+        assert!(output.contains("super_item_id: Mapped[int] = mapped_column(ForeignKey('simple_super_items.id'), primary_key=True)"));
+        assert!(output.contains("data2: Mapped[Optional[int]] = mapped_column(Integer)"));
+
+        // Grandchild inherits from child
+        assert!(output.contains("class SimpleSubItems(SimpleItems):"));
+        assert!(output.contains("simple_items_id: Mapped[int] = mapped_column(ForeignKey('simple_items.super_item_id'), primary_key=True)"));
+        assert!(output.contains("data3: Mapped[Optional[int]] = mapped_column(Integer)"));
+
+        // No relationship() calls for inheritance FKs
+        assert!(!output.contains("relationship("));
     }
 }
