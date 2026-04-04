@@ -1,8 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
-    escape_python_string, format_server_default, is_primary_key_column, is_serial_default,
-    is_unique_constraint_index, quote_constraint_columns, topo_sort_tables, Generator,
+    escape_python_string, format_python_string_literal, format_server_default,
+    is_primary_key_column, is_serial_default, is_unique_constraint_index,
+    quote_constraint_columns, topo_sort_tables, Generator,
 };
 use crate::dialect::Dialect;
 use crate::naming::table_to_variable_name;
@@ -109,7 +110,7 @@ fn generate_table(
         // Comment
         if !options.nocomments {
             if let Some(ref comment) = col.comment {
-                col_args.push(format!("comment='{}'", escape_python_string(comment)));
+                col_args.push(format!("comment={}", format_python_string_literal(comment)));
             }
         }
 
@@ -192,12 +193,7 @@ fn generate_table(
     // Table comment
     if !options.nocomments {
         if let Some(ref comment) = table.comment {
-            // Use double quotes if comment contains single quotes, else single quotes
-            if comment.contains('\'') {
-                body_items.push(format!("comment=\"{comment}\""));
-            } else {
-                body_items.push(format!("comment='{comment}'"));
-            }
+            body_items.push(format!("comment={}", format_python_string_literal(comment)));
         }
     }
 

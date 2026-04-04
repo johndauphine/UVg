@@ -1,9 +1,9 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
-    escape_python_string, format_server_default, has_primary_key, is_primary_key_column,
-    is_serial_default, is_unique_constraint_index, quote_constraint_columns, topo_sort_tables,
-    Generator,
+    escape_python_string, format_python_string_literal, format_server_default, has_primary_key,
+    is_primary_key_column, is_serial_default, is_unique_constraint_index,
+    quote_constraint_columns, topo_sort_tables, Generator,
 };
 use crate::dialect::Dialect;
 use crate::naming::{table_to_class_name, table_to_variable_name};
@@ -218,11 +218,7 @@ fn generate_class(
         // Comment
         if !options.nocomments {
             if let Some(ref comment) = col.comment {
-                if comment.contains('\'') {
-                    mc_args.push(format!("comment=\"{comment}\""));
-                } else {
-                    mc_args.push(format!("comment='{comment}'"));
-                }
+                mc_args.push(format!("comment={}", format_python_string_literal(comment)));
             }
         }
 
@@ -328,11 +324,8 @@ fn build_table_args(
     // Table comment (kwarg)
     if !options.nocomments {
         if let Some(ref comment) = table.comment {
-            if comment.contains('\'') {
-                kwargs.push(format!("'comment': \"{}\"", comment));
-            } else {
-                kwargs.push(format!("'comment': '{}'", comment));
-            }
+            let lit = format_python_string_literal(comment);
+            kwargs.push(format!("'comment': {lit}"));
         }
     }
 

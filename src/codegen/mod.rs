@@ -114,6 +114,18 @@ pub fn escape_python_string(s: &str) -> String {
     s.replace('\'', "\\'")
 }
 
+/// Format a string as a Python string literal, choosing quote style and escaping properly.
+/// Uses double quotes if the string contains single quotes (and no double quotes),
+/// otherwise uses single quotes with escaping. Newlines are always escaped.
+pub fn format_python_string_literal(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('\n', "\\n");
+    if escaped.contains('\'') && !escaped.contains('"') {
+        format!("\"{}\"", escaped)
+    } else {
+        format!("'{}'", escaped.replace('\'', "\\'"))
+    }
+}
+
 /// Sort tables in topological order by FK dependencies (Kahn's algorithm).
 /// Referenced tables come before referencing tables. Alphabetical tiebreak.
 pub fn topo_sort_tables(tables: &[crate::schema::TableInfo]) -> Vec<&crate::schema::TableInfo> {
