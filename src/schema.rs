@@ -44,6 +44,7 @@ pub struct ColumnInfo {
     pub identity: Option<IdentityInfo>,
     pub comment: Option<String>,
     pub collation: Option<String>,
+    pub autoincrement: Option<bool>,
 }
 
 /// Parameters for an identity column's underlying sequence.

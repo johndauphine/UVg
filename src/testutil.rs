@@ -19,6 +19,7 @@ pub fn test_column(name: &str) -> ColumnInfo {
         identity: None,
         comment: None,
         collation: None,
+        autoincrement: None,
     }
 }
 
@@ -85,6 +86,11 @@ impl ColumnInfoBuilder {
 
     pub fn collation(mut self, c: &str) -> Self {
         self.inner.collation = Some(c.to_string());
+        self
+    }
+
+    pub fn autoincrement(mut self) -> Self {
+        self.inner.autoincrement = Some(true);
         self
     }
 

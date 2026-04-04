@@ -101,6 +101,7 @@ pub async fn query_columns(
             identity,
             comment: row.get::<&str, _>("comment").map(|s| s.to_string()),
             collation: row.get::<&str, _>("COLLATION_NAME").map(|s| s.to_string()),
+            autoincrement: None,
         });
     }
 

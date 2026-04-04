@@ -50,6 +50,7 @@ pub async fn query_columns(
             identity,
             comment: row.comment,
             collation: None,
+            autoincrement: None,
         });
     }
 

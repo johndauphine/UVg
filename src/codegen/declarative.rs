@@ -142,7 +142,24 @@ fn generate_class(
     }
     let mut col_lines: Vec<ColLine> = Vec::new();
 
-    for col in &table.columns {
+    // Pre-scan: check if any column has a server_default (which imports `text`)
+    let will_import_text = table.columns.iter().any(|c| {
+        c.column_default.as_ref().map_or(false, |d| !is_serial_default(d, dialect))
+    });
+
+    // Pre-compute attribute names and resolve collisions
+    let mut attr_names = resolve_attr_names(&table.columns);
+    // Resolve import-level conflicts (e.g. column "text" conflicts with imported `text`)
+    if will_import_text {
+        for name in &mut attr_names {
+            if name == "text" {
+                name.push('_');
+            }
+        }
+    }
+
+    for (idx, col) in table.columns.iter().enumerate() {
+        let attr_name = &attr_names[idx];
         let mapped = map_column_type(col, dialect);
         imports.add(&mapped.import_module, &mapped.import_name);
         if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
@@ -171,14 +188,11 @@ fn generate_class(
             python_type.clone()
         };
 
-        // Sanitize column name to valid Python attribute name
-        let attr_name = column_to_attr_name(&col.name);
-
         // mapped_column arguments
         let mut mc_args: Vec<String> = Vec::new();
 
         // Explicit column name when attribute name differs
-        if attr_name != col.name {
+        if *attr_name != col.name {
             mc_args.push(format!("'{}'", col.name));
         }
 
@@ -215,6 +229,10 @@ fn generate_class(
             // Explicitly emit nullable=True for nullable PK columns (composite PKs)
             if col.is_nullable {
                 mc_args.push("nullable=True".to_string());
+            }
+            // Autoincrement on composite PK columns
+            if col.autoincrement == Some(true) {
+                mc_args.push("autoincrement=True".to_string());
             }
         }
 
@@ -261,6 +279,23 @@ fn generate_class(
     }
 
     (lines.join("\n"), meta)
+}
+
+/// Pre-compute sanitized attribute names for all columns, resolving collisions.
+/// When two columns sanitize to the same name, the later one gets a trailing `_`.
+fn resolve_attr_names(columns: &[crate::schema::ColumnInfo]) -> Vec<String> {
+    let mut names: Vec<String> = columns.iter().map(|c| column_to_attr_name(&c.name)).collect();
+
+    // Resolve collisions: if name[i] == name[j] where j > i, append _ to name[j]
+    for i in 0..names.len() {
+        for j in (i + 1)..names.len() {
+            if names[j] == names[i] {
+                names[j].push('_');
+            }
+        }
+    }
+
+    names
 }
 
 fn build_table_args(
@@ -881,6 +916,7 @@ mod tests {
             table("simple-items")
                 .column(col("id-test").build())
                 .column(col("4test").nullable().build())
+                .column(col("_4test").nullable().build())
                 .column(col("def").nullable().build())
                 .pk("simple_items_pkey", &["id-test"])
                 .build(),
@@ -891,6 +927,8 @@ mod tests {
         assert!(output.contains("id_test: Mapped[int] = mapped_column('id-test', Integer, primary_key=True)"));
         // Leading digit gets underscore prefix
         assert!(output.contains("_4test: Mapped[Optional[int]] = mapped_column('4test', Integer)"));
+        // _4test collides with sanitized '4test', so gets trailing underscore
+        assert!(output.contains("_4test_: Mapped[Optional[int]] = mapped_column('_4test', Integer)"));
         // Python keyword gets trailing underscore
         assert!(output.contains("def_: Mapped[Optional[int]] = mapped_column('def', Integer)"));
     }
@@ -945,9 +983,45 @@ mod tests {
         assert!(output.contains("from sqlalchemy import CheckConstraint"));
     }
 
-    // TODO: test_declarative_colname_import_conflict requires detecting import-level
-    // name conflicts at generation time (e.g. column "text" conflicts with imported
-    // sqlalchemy.text when server_default is used). Deferred to a future pass.
+    /// Adapted from sqlacodegen test_colname_import_conflict.
+    #[test]
+    fn test_declarative_colname_import_conflict() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").build())
+                .column(col("text").udt("varchar").nullable().build())
+                .column(
+                    col("textwithdefault")
+                        .udt("varchar")
+                        .nullable()
+                        .default_val("'test'")
+                        .build(),
+                )
+                .pk("simple_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // "text" conflicts with sqlalchemy.text import (from server_default)
+        assert!(output.contains("text_: Mapped[Optional[str]] = mapped_column('text', String)"));
+        assert!(output.contains("textwithdefault: Mapped[Optional[str]] = mapped_column(String, server_default=text"));
+    }
+
+    /// Adapted from sqlacodegen test_composite_autoincrement_pk.
+    #[test]
+    fn test_declarative_composite_autoincrement_pk() {
+        let schema = schema_pg(vec![
+            table("simple_autoincrement_items")
+                .column(col("id1").autoincrement().build())
+                .column(col("id2").build())
+                .pk("simple_autoincrement_items_pkey", &["id1", "id2"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("id1: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)"));
+        assert!(output.contains("id2: Mapped[int] = mapped_column(Integer, primary_key=True)"));
+    }
 
     /// Adapted from sqlacodegen test_composite_nullable_pk.
     #[test]
