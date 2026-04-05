@@ -445,13 +445,36 @@ fn generate_class(
 
     // Resolve relationship name conflicts with column attribute names
     let col_attr_names: std::collections::HashSet<&str> = attr_names.iter().map(|s| s.as_str()).collect();
+    let mut rel_attr_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut renames: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
     for rel in parent_rels
         .iter_mut()
         .chain(child_rels.iter_mut())
         .chain(m2m_rels.iter_mut())
     {
-        if col_attr_names.contains(rel.attr_name.as_str()) {
+        let original = rel.attr_name.clone();
+        while col_attr_names.contains(rel.attr_name.as_str())
+            || rel_attr_names.contains(&rel.attr_name)
+        {
             rel.attr_name.push('_');
+        }
+        if rel.attr_name != original {
+            renames.insert(original, rel.attr_name.clone());
+        }
+        rel_attr_names.insert(rel.attr_name.clone());
+    }
+
+    // Update back_populates references to match renamed attributes
+    if !renames.is_empty() {
+        for rel in parent_rels
+            .iter_mut()
+            .chain(child_rels.iter_mut())
+            .chain(m2m_rels.iter_mut())
+        {
+            if let Some(new_name) = renames.get(&rel.back_populates) {
+                rel.back_populates = new_name.clone();
+            }
         }
     }
 
@@ -772,11 +795,16 @@ fn generate_table_fallback(
                         .map(|c| format!("'{}.{c}'", fk.ref_table))
                         .collect();
                     let fk_opts = format_fk_options(fk);
+                    let name_part = if !options.nofknames {
+                        format!(", name='{}'", constraint.name)
+                    } else {
+                        String::new()
+                    };
                     body_items.push(format!(
-                        "ForeignKeyConstraint([{}], [{}], name='{}'{})",
+                        "ForeignKeyConstraint([{}], [{}]{}{})",
                         local_cols.join(", "),
                         ref_cols.join(", "),
-                        constraint.name,
+                        name_part,
                         fk_opts
                     ));
                 }
