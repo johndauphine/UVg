@@ -8,12 +8,27 @@ use crate::dialect::Dialect;
 #[derive(Parser, Debug)]
 #[command(name = "uvg", version, about)]
 pub struct Cli {
-    /// SQLAlchemy-style database URL (e.g. postgresql://, mysql://, sqlite:///path, mssql://)
+    /// Source database URL (e.g. postgresql://, mysql://, sqlite:///path, mssql://)
     pub url: String,
 
-    /// Code generator to use
+    /// Target database URL for DDL generation/migration (optional)
+    pub target_url: Option<String>,
+
+    /// Code generator to use (declarative, tables, ddl)
     #[arg(long, default_value = "declarative")]
     pub generator: String,
+
+    /// Target SQL dialect for DDL output (postgres, mysql, sqlite, mssql)
+    #[arg(long)]
+    pub target_dialect: Option<String>,
+
+    /// Output one file per table into the outfile directory
+    #[arg(long)]
+    pub split_tables: bool,
+
+    /// Execute DDL on the target database (requires target URL)
+    #[arg(long)]
+    pub apply: bool,
 
     /// Tables to process (comma-delimited)
     #[arg(long)]
@@ -31,7 +46,7 @@ pub struct Cli {
     #[arg(long)]
     pub options: Option<String>,
 
-    /// Output file (default: stdout)
+    /// Output file or directory (default: stdout)
     #[arg(long)]
     pub outfile: Option<String>,
 
@@ -51,6 +66,17 @@ pub struct GeneratorOptions {
     pub nosyntheticenums: bool,
     pub nonativeenums: bool,
     pub keep_dialect_types: bool,
+}
+
+/// Options specific to the DDL generator.
+#[derive(Debug)]
+pub struct DdlOptions {
+    pub target_dialect: Dialect,
+    pub split_tables: bool,
+    pub apply: bool,
+    pub noindexes: bool,
+    pub noconstraints: bool,
+    pub nocomments: bool,
 }
 
 /// Parsed connection configuration.
@@ -146,6 +172,69 @@ impl Cli {
             }
         }
         opts
+    }
+
+    /// Build DDL-specific options. `source_dialect` is used as the default target
+    /// when neither `--target-dialect` nor a target URL is provided.
+    pub fn ddl_options(
+        &self,
+        source_dialect: Dialect,
+    ) -> Result<DdlOptions, crate::error::UvgError> {
+        let target_dialect = if let Some(ref td) = self.target_dialect {
+            td.parse::<Dialect>()
+                .map_err(|e| crate::error::UvgError::InvalidDialect(e))?
+        } else if let Some(ref target_url) = self.target_url {
+            // Infer dialect from target URL scheme
+            let cli = Cli {
+                url: target_url.clone(),
+                target_url: None,
+                generator: String::new(),
+                target_dialect: None,
+                split_tables: false,
+                apply: false,
+                tables: None,
+                schemas: None,
+                noviews: false,
+                options: None,
+                outfile: None,
+                trust_cert: self.trust_cert,
+            };
+            cli.parse_connection()?.dialect()
+        } else {
+            source_dialect
+        };
+
+        let gen_opts = self.generator_options();
+        Ok(DdlOptions {
+            target_dialect,
+            split_tables: self.split_tables,
+            apply: self.apply,
+            noindexes: gen_opts.noindexes,
+            noconstraints: gen_opts.noconstraints,
+            nocomments: gen_opts.nocomments,
+        })
+    }
+
+    /// Parse a target URL into a `ConnectionConfig`.
+    pub fn parse_target_connection(
+        &self,
+        target_url: &str,
+    ) -> Result<ConnectionConfig, crate::error::UvgError> {
+        let cli = Cli {
+            url: target_url.to_string(),
+            target_url: None,
+            generator: String::new(),
+            target_dialect: None,
+            split_tables: false,
+            apply: false,
+            tables: None,
+            schemas: None,
+            noviews: false,
+            options: None,
+            outfile: None,
+            trust_cert: self.trust_cert,
+        };
+        cli.parse_connection()
     }
 
     /// Parse the URL into a `ConnectionConfig`.
@@ -274,7 +363,11 @@ mod tests {
     fn cli_with_url(url: &str) -> Cli {
         Cli {
             url: url.to_string(),
+            target_url: None,
             generator: "declarative".to_string(),
+            target_dialect: None,
+            split_tables: false,
+            apply: false,
             tables: None,
             schemas: None,
             noviews: false,

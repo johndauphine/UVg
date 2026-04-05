@@ -1,3 +1,4 @@
+pub mod ddl;
 pub mod declarative;
 pub mod imports;
 pub mod relationships;
@@ -28,7 +29,7 @@ pub fn format_server_default(default: &str, dialect: Dialect) -> String {
 /// Strip PostgreSQL type casts from a default expression.
 /// e.g. "'hello'::character varying" -> "'hello'"
 /// e.g. "0::integer" -> "0"
-fn strip_pg_typecast(expr: &str) -> &str {
+pub(crate) fn strip_pg_typecast(expr: &str) -> &str {
     // Find the last :: that's not inside quotes
     if let Some(pos) = find_typecast_pos(expr) {
         expr[..pos].trim()
@@ -64,7 +65,7 @@ fn find_typecast_pos(expr: &str) -> Option<usize> {
 /// Strip MSSQL wrapping parentheses and leading N from string literals.
 /// e.g. "((0))" -> "0"
 /// e.g. "(N'hello')" -> "'hello'"
-fn strip_mssql_parens(expr: &str) -> &str {
+pub(crate) fn strip_mssql_parens(expr: &str) -> &str {
     let mut s = expr.trim();
     // Strip outer parens: MSSQL defaults are often wrapped like ((value))
     while s.starts_with('(') && s.ends_with(')') {
