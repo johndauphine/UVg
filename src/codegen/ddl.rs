@@ -74,7 +74,15 @@ impl DdlGenerator {
 
             let table_ddl = table_stmts.join("\n\n");
             all_stmts.push(table_ddl.clone());
-            per_table.push((format!("{}.sql", table.name), table_ddl));
+            // Disambiguate filenames by schema for multi-schema introspection
+            let filename = if table.schema.is_empty()
+                || table.schema == target_dialect.default_schema()
+            {
+                format!("{}.sql", table.name)
+            } else {
+                format!("{}_{}.sql", table.schema, table.name)
+            };
+            per_table.push((filename, table_ddl));
         }
 
         if options.split_tables {
@@ -704,8 +712,12 @@ fn diff_column(
         Dialect::Mysql => {
             // MySQL requires full column redefinition with MODIFY
             let not_null = if !source.is_nullable { " NOT NULL" } else { "" };
+            let default_clause = match &source_default {
+                Some(d) => format!(" DEFAULT {d}"),
+                None => String::new(),
+            };
             stmts.push(format!(
-                "ALTER TABLE {tname} MODIFY COLUMN {cname} {}{not_null};",
+                "ALTER TABLE {tname} MODIFY COLUMN {cname} {}{not_null}{default_clause};",
                 source_type.sql_type
             ));
         }

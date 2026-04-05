@@ -143,14 +143,21 @@ pub async fn query_constraints(
     {
         Ok(rows) => rows,
         Err(e) => {
-            // MySQL < 8.0.16 does not have CHECK_CONSTRAINTS; log and skip
-            tracing::debug!(
-                "Skipping CHECK constraints for {}.{}: {}",
-                schema,
-                table_name,
-                e
-            );
-            vec![]
+            let msg = e.to_string();
+            // MySQL < 8.0.16 does not have CHECK_CONSTRAINTS table.
+            // Only suppress "table doesn't exist" errors (error 1109/1146);
+            // propagate other errors (permissions, connectivity, etc.).
+            if msg.contains("1109") || msg.contains("1146") || msg.contains("doesn't exist") {
+                tracing::debug!(
+                    "Skipping CHECK constraints for {}.{} (table not available): {}",
+                    schema,
+                    table_name,
+                    e
+                );
+                vec![]
+            } else {
+                return Err(e.into());
+            }
         }
     };
 
