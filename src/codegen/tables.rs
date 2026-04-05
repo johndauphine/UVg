@@ -266,10 +266,23 @@ fn generate_table(
         if let Some(ref default) = col.column_default {
             if is_serial_default(default, dialect) {
                 // Check for non-standard sequence name → emit Sequence()
-                if let Some(seq_name) = parse_sequence_name(default) {
-                    if !is_standard_sequence_name(&seq_name, &table.name, &col.name) {
+                if let Some(full_seq_name) = parse_sequence_name(default) {
+                    // Strip schema prefix for standard name check
+                    let bare_name = full_seq_name.rsplit('.').next().unwrap_or(&full_seq_name);
+                    if !is_standard_sequence_name(bare_name, &table.name, &col.name) {
                         imports.add("sqlalchemy", "Sequence");
-                        col_args.push(format!("Sequence('{seq_name}')"));
+                        // Split schema.name if present
+                        if let Some(dot_pos) = full_seq_name.find('.') {
+                            let seq_schema = &full_seq_name[..dot_pos];
+                            let seq_name = &full_seq_name[dot_pos + 1..];
+                            col_args.push(format!(
+                                "Sequence({}, schema={})",
+                                format_python_string_literal(seq_name),
+                                format_python_string_literal(seq_schema)
+                            ));
+                        } else {
+                            col_args.push(format!("Sequence({})", format_python_string_literal(&full_seq_name)));
+                        }
                     }
                 }
             } else {
@@ -1192,5 +1205,24 @@ mod tests {
         assert!(output.contains("'positive_int'"));
         assert!(output.contains("Integer()"));
         assert!(output.contains("constraint_name='positive'"));
+    }
+
+    // --- PR 13: Sequence with schema ---
+
+    /// Adapted from sqlacodegen test_postgresql_sequence_with_schema.
+    #[test]
+    fn test_tables_postgresql_sequence_with_schema() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .schema("testschema")
+                .column(col("id").default_val("nextval('testschema.test_seq'::regclass)").build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Schema-qualified sequence: should parse and emit Sequence with schema
+        assert!(output.contains("Sequence("));
+        assert!(output.contains("test_seq"));
     }
 }
