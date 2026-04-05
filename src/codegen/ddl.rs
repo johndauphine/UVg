@@ -423,7 +423,58 @@ fn format_ddl_default_typed(
     }
 
     // Step 3: Translate common function names
-    translate_default_function(cleaned, target_dialect)
+    let result = translate_default_function(cleaned, target_dialect);
+
+    // Step 4: Quote bare string defaults that MySQL stores without quotes.
+    // Numeric values, SQL keywords, function calls, and already-quoted strings pass through.
+    ensure_default_quoting(&result)
+}
+
+/// Ensure a default value is properly quoted if it's a bare string literal.
+/// MySQL stores string defaults without quotes (e.g. `member` instead of `'member'`).
+/// Numbers, NULL, function calls (containing parens), boolean keywords,
+/// and already-quoted strings are left as-is.
+fn ensure_default_quoting(expr: &str) -> String {
+    let trimmed = expr.trim();
+
+    // Already quoted
+    if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+        || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+    {
+        return trimmed.to_string();
+    }
+
+    // NULL
+    if trimmed.eq_ignore_ascii_case("null") {
+        return trimmed.to_string();
+    }
+
+    // Boolean keywords
+    if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
+        return trimmed.to_string();
+    }
+
+    // Numeric (integer or decimal)
+    if trimmed.parse::<f64>().is_ok() {
+        return trimmed.to_string();
+    }
+
+    // Function call (contains parentheses)
+    if trimmed.contains('(') {
+        return trimmed.to_string();
+    }
+
+    // SQL keywords that are valid unquoted defaults
+    let upper = trimmed.to_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "CURRENT_USER"
+    ) {
+        return trimmed.to_string();
+    }
+
+    // Bare string — needs quoting
+    format!("'{}'", trimmed.replace('\'', "''"))
 }
 
 /// Translate common SQL functions between dialects.
@@ -469,10 +520,17 @@ fn qualified_table_name(schema: &str, table: &str, dialect: Dialect) -> String {
         return quote_identifier(table, dialect);
     }
 
-    // Map other dialects' default schemas to the target's default
-    // (e.g., source "public" when targeting MSSQL → use unqualified name under dbo)
-    let is_source_default = schema == "public" || schema == "dbo" || schema == "main";
-    if is_source_default {
+    // Map other dialects' default schemas to the target's default.
+    // This covers PG "public" → MSSQL (use dbo), MSSQL "dbo" → PG (use public),
+    // and SQLite "main".
+    let is_source_default_schema =
+        schema == "public" || schema == "dbo" || schema == "main";
+
+    // For MySQL targets, the schema IS the database name — always suppress it
+    // since the target connection already specifies the database.
+    let suppress_for_mysql_target = dialect == Dialect::Mysql;
+
+    if is_source_default_schema || suppress_for_mysql_target {
         return quote_identifier(table, dialect);
     }
 
@@ -624,12 +682,23 @@ fn detect_fk_cycles(tables: &[TableInfo]) -> bool {
 }
 
 /// Normalize default schemas to empty string for cross-dialect comparison.
-/// PG "public", MSSQL "dbo", SQLite "main" are all treated as equivalent.
-fn normalize_diff_schema(schema: &str) -> &str {
-    match schema {
-        "public" | "dbo" | "main" | "" => "",
-        other => other,
+/// PG "public", MSSQL "dbo", SQLite "main" are well-known defaults.
+/// For MySQL, `mysql_default_schemas` contains the database names from each side
+/// (e.g. "sourcedb", "targetdb") which should also be treated as defaults.
+/// Non-default schemas are preserved to keep multi-schema diffing correct.
+fn normalize_diff_schema<'a>(
+    schema: &'a str,
+    mysql_defaults: &std::collections::HashSet<String>,
+) -> &'a str {
+    // Well-known defaults
+    if matches!(schema, "public" | "dbo" | "main" | "") {
+        return "";
     }
+    // MySQL database names that were the default for their respective connections
+    if mysql_defaults.contains(schema) {
+        return "";
+    }
+    schema
 }
 
 /// Diff two schemas and emit ALTER statements.
@@ -642,18 +711,34 @@ fn diff_schemas(
     let source_dialect = source.dialect;
     let target_dialect = options.target_dialect;
 
-    // Key by table name, normalizing default schemas across dialects.
-    // PG "public", MSSQL "dbo", SQLite "main" are all treated as the default
-    // and matched against each other so cross-dialect diffs work correctly.
+    // For MySQL, the schema is the database name. When each side has exactly
+    // one schema (the common case), treat those as defaults so sourcedb.users
+    // matches targetdb.users. Non-default schemas are preserved for multi-schema diffs.
+    let mut mysql_defaults = std::collections::HashSet::new();
+    if source_dialect == Dialect::Mysql {
+        let schemas: std::collections::HashSet<&str> =
+            source.tables.iter().map(|t| t.schema.as_str()).collect();
+        if schemas.len() == 1 {
+            mysql_defaults.insert(schemas.into_iter().next().unwrap().to_string());
+        }
+    }
+    if target_dialect == Dialect::Mysql {
+        let schemas: std::collections::HashSet<&str> =
+            target.tables.iter().map(|t| t.schema.as_str()).collect();
+        if schemas.len() == 1 {
+            mysql_defaults.insert(schemas.into_iter().next().unwrap().to_string());
+        }
+    }
+
     let source_map: HashMap<(&str, &str), &TableInfo> = source
         .tables
         .iter()
-        .map(|t| ((normalize_diff_schema(&t.schema), t.name.as_str()), t))
+        .map(|t| ((normalize_diff_schema(&t.schema, &mysql_defaults), t.name.as_str()), t))
         .collect();
     let target_map: HashMap<(&str, &str), &TableInfo> = target
         .tables
         .iter()
-        .map(|t| ((normalize_diff_schema(&t.schema), t.name.as_str()), t))
+        .map(|t| ((normalize_diff_schema(&t.schema, &mysql_defaults), t.name.as_str()), t))
         .collect();
 
     let mut stmts: Vec<String> = Vec::new();
@@ -664,7 +749,7 @@ fn diff_schemas(
         if table.table_type != TableType::Table {
             continue;
         }
-        let key = (normalize_diff_schema(&table.schema), table.name.as_str());
+        let key = (normalize_diff_schema(&table.schema, &mysql_defaults), table.name.as_str());
         if !target_map.contains_key(&key) {
             stmts.push(generate_create_table(
                 table,
@@ -683,7 +768,7 @@ fn diff_schemas(
         if table.table_type != TableType::Table {
             continue;
         }
-        let key = (normalize_diff_schema(&table.schema), table.name.as_str());
+        let key = (normalize_diff_schema(&table.schema, &mysql_defaults), table.name.as_str());
         if let Some(target_table) = target_map.get(&key) {
             let alters = diff_table_columns(
                 table,
@@ -1204,5 +1289,103 @@ mod tests {
             format_ddl_default_typed("false", Dialect::Postgres, Dialect::Mssql, true),
             "0"
         );
+    }
+
+    #[test]
+    #[test]
+    fn test_diff_cross_dialect_default_schemas_match() {
+        // PG "public" and MSSQL "dbo" are both defaults — tables should match by name
+        let source = schema_pg(vec![
+            table("users")
+                .column(col("id").build())
+                .pk("pk_users", &["id"])
+                .build(),
+        ]);
+        // Same table in "dbo" schema (MSSQL default) with same column types
+        let target = schema_pg(vec![
+            table("users")
+                .schema("dbo")
+                .column(col("id").build())
+                .pk("pk_users", &["id"])
+                .build(),
+        ]);
+
+        let options = DdlOptions {
+            target_dialect: Dialect::Postgres,
+            split_tables: false,
+            apply: false,
+            noindexes: false,
+            noconstraints: false,
+            nocomments: false,
+        };
+
+        let ddl = diff_schemas(&source, &target, &options);
+        assert!(
+            ddl.contains("No schema changes detected"),
+            "PG public should match dbo as both are defaults: {ddl}"
+        );
+    }
+
+    #[test]
+    fn test_diff_multi_schema_preserved() {
+        // Tables in different non-default schemas should NOT match
+        let source = schema_pg(vec![
+            table("users")
+                .schema("schema_a")
+                .column(col("id").build())
+                .pk("pk_users", &["id"])
+                .build(),
+        ]);
+        let target = schema_pg(vec![
+            table("users")
+                .schema("schema_b")
+                .column(col("id").build())
+                .pk("pk_users", &["id"])
+                .build(),
+        ]);
+
+        let options = DdlOptions {
+            target_dialect: Dialect::Postgres,
+            split_tables: false,
+            apply: false,
+            noindexes: false,
+            noconstraints: false,
+            nocomments: false,
+        };
+
+        let ddl = diff_schemas(&source, &target, &options);
+        // schema_a.users and schema_b.users are different tables
+        assert!(
+            ddl.contains("CREATE TABLE") && ddl.contains("DROP TABLE"),
+            "Non-default schemas should not match: {ddl}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_default_quoting() {
+        // Bare strings should be quoted
+        assert_eq!(ensure_default_quoting("member"), "'member'");
+        assert_eq!(ensure_default_quoting("active"), "'active'");
+
+        // Already quoted stays as-is
+        assert_eq!(ensure_default_quoting("'member'"), "'member'");
+
+        // Numbers stay as-is
+        assert_eq!(ensure_default_quoting("0"), "0");
+        assert_eq!(ensure_default_quoting("3.14"), "3.14");
+
+        // NULL stays as-is
+        assert_eq!(ensure_default_quoting("NULL"), "NULL");
+
+        // Booleans stay as-is
+        assert_eq!(ensure_default_quoting("true"), "true");
+        assert_eq!(ensure_default_quoting("false"), "false");
+
+        // Function calls stay as-is
+        assert_eq!(ensure_default_quoting("now()"), "now()");
+        assert_eq!(ensure_default_quoting("CURRENT_TIMESTAMP"), "CURRENT_TIMESTAMP");
+
+        // String with single quotes gets escaped
+        assert_eq!(ensure_default_quoting("it's"), "'it''s'");
     }
 }
