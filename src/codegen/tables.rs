@@ -3,8 +3,9 @@ use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
     format_python_string_literal, format_server_default, generate_enum_class,
-    is_primary_key_column, is_serial_default, is_unique_constraint_index,
-    parse_check_enum, quote_constraint_columns, topo_sort_tables, Generator,
+    is_primary_key_column, is_serial_default, is_standard_sequence_name,
+    is_unique_constraint_index, parse_check_enum, parse_sequence_name,
+    quote_constraint_columns, topo_sort_tables, Generator,
 };
 use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
@@ -202,10 +203,17 @@ fn generate_table(
             col_args.push("nullable=False".to_string());
         }
 
-        // Server default
+        // Server default / Sequence
         if let Some(ref default) = col.column_default {
-            // Skip nextval defaults (auto-generated for serial columns)
-            if !is_serial_default(default, dialect) {
+            if is_serial_default(default, dialect) {
+                // Check for non-standard sequence name → emit Sequence()
+                if let Some(seq_name) = parse_sequence_name(default) {
+                    if !is_standard_sequence_name(&seq_name, &table.name, &col.name) {
+                        imports.add("sqlalchemy", "Sequence");
+                        col_args.push(format!("Sequence('{seq_name}')"));
+                    }
+                }
+            } else {
                 imports.add("sqlalchemy", "text");
                 let formatted = format_server_default(default, dialect);
                 col_args.push(format!("server_default={formatted}"));
@@ -836,5 +844,60 @@ mod tests {
         // Enum() includes schema kwarg
         assert!(output.contains("schema='someschema'"));
         assert!(output.contains("name='status_enum'"));
+    }
+
+    // --- PR 7: Sequences and computed columns ---
+
+    /// Adapted from sqlacodegen test_postgresql_sequence_standard_name.
+    /// Standard sequence naming is stripped (no Sequence() in output).
+    #[test]
+    fn test_tables_postgresql_sequence_standard_name() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").default_val("nextval('simple_items_id_seq'::regclass)").build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Standard sequence stripped — just primary_key=True, no server_default
+        assert!(output.contains("Column('id', Integer, primary_key=True)"));
+        assert!(!output.contains("Sequence"));
+        assert!(!output.contains("server_default"));
+    }
+
+    /// Adapted from sqlacodegen test_postgresql_sequence_nonstandard_name.
+    /// Non-standard sequence name preserved as Sequence().
+    #[test]
+    fn test_tables_postgresql_sequence_nonstandard_name() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").default_val("nextval('test_seq'::regclass)").build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Sequence('test_seq')"));
+        assert!(output.contains("primary_key=True"));
+        assert!(output.contains("from sqlalchemy import"));
+        assert!(output.contains("Sequence"));
+    }
+
+    /// Adapted from sqlacodegen test_computed_column (persisted=None).
+    #[test]
+    fn test_tables_computed_column() {
+        let schema = schema_pg(vec![
+            table("computed")
+                .column(col("id").build())
+                .column(col("computed").nullable().default_val("1 + 2").build())
+                .pk("computed_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // For now, computed columns render as server_default (full Computed() support is future work)
+        assert!(output.contains("Column('id', Integer, primary_key=True)"));
+        assert!(output.contains("server_default=text('1 + 2')"));
     }
 }
