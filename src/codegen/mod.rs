@@ -11,6 +11,127 @@ use crate::schema::IntrospectedSchema;
 /// Trait for code generators.
 pub trait Generator {
     fn generate(&self, schema: &IntrospectedSchema, options: &GeneratorOptions) -> String;
+
+    /// Generate split output: one file per table/class.
+    /// Returns Vec of (filename, content) pairs.
+    /// Default implementation splits the single output by class/table definitions.
+    fn generate_split(
+        &self,
+        schema: &IntrospectedSchema,
+        options: &GeneratorOptions,
+    ) -> Vec<(String, String)> {
+        let full = self.generate(schema, options);
+        split_python_output(&full)
+    }
+}
+
+/// Split generated Python code into per-file chunks.
+/// Everything before the first model class/Table() assignment goes into base.py.
+/// Each class or t_xxx = Table(...) block becomes its own file.
+/// Each model file gets `from .base import *` so it can run standalone.
+/// Returns (filename, content) pairs plus base.py and __init__.py.
+pub fn split_python_output(full: &str) -> Vec<(String, String)> {
+    let blocks = split_python_blocks(full);
+
+    let mut base_parts: Vec<&str> = Vec::new();
+    let mut model_files: Vec<(String, String)> = Vec::new();
+
+    for block in &blocks {
+        let trimmed = block.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(name) = extract_model_name(trimmed) {
+            // Prepend import from base so each file is independently importable
+            let content = format!("from .base import *  # noqa\n\n{trimmed}\n");
+            model_files.push((format!("{name}.py"), content));
+        } else {
+            // Everything else (imports, enum classes, Base/metadata) → base.py
+            base_parts.push(trimmed);
+        }
+    }
+
+    let mut files: Vec<(String, String)> = Vec::new();
+
+    // base.py
+    let base_content = base_parts.join("\n\n") + "\n";
+    files.push(("base.py".to_string(), base_content));
+
+    // Model files
+    let model_names: Vec<String> = model_files.iter().map(|(n, _)| n.clone()).collect();
+    files.extend(model_files);
+
+    // __init__.py re-exports
+    let mut init_lines = vec!["from .base import *  # noqa".to_string()];
+    for name in &model_names {
+        let module = name.strip_suffix(".py").unwrap_or(name);
+        init_lines.push(format!("from .{module} import *  # noqa"));
+    }
+    init_lines.push(String::new());
+    files.push(("__init__.py".to_string(), init_lines.join("\n")));
+
+    files
+}
+
+/// Split generated output into logical blocks.
+/// Tries triple-newline first (declarative generator), falls back to double-newline
+/// (tables generator), picking whichever separator yields more model blocks.
+fn split_python_blocks(full: &str) -> Vec<&str> {
+    let separators = ["\n\n\n", "\n\n"];
+    let mut best_blocks: Vec<&str> = vec![full];
+    let mut best_model_count = 0usize;
+
+    for separator in separators {
+        let blocks: Vec<&str> = full.split(separator).collect();
+        let model_count = blocks
+            .iter()
+            .map(|block| block.trim())
+            .filter(|block| !block.is_empty())
+            .filter(|block| extract_model_name(block).is_some())
+            .count();
+
+        if model_count > best_model_count {
+            best_model_count = model_count;
+            best_blocks = blocks;
+        }
+    }
+
+    best_blocks
+}
+
+/// Extract a filename from a code block.
+/// Only matches ORM model classes (must have `__tablename__`) or Table() assignments.
+/// Enum classes and Base class are NOT matched — they stay in base.py.
+fn extract_model_name(block: &str) -> Option<String> {
+    let first_line = block.lines().next()?;
+
+    // "class Users(Base):" → "users" (only if block contains __tablename__)
+    if first_line.starts_with("class ") && first_line.contains('(') {
+        let class_name = first_line
+            .strip_prefix("class ")?
+            .split('(')
+            .next()?
+            .trim();
+        // Must have __tablename__ to be a model (not an enum class or Base)
+        let has_tablename = block.lines().skip(1).any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("__tablename__") && trimmed.contains('=')
+        });
+        if has_tablename {
+            use heck::ToSnakeCase;
+            return Some(class_name.to_snake_case());
+        }
+        return None;
+    }
+
+    // "t_post_tags = Table(" → "t_post_tags"
+    if first_line.starts_with("t_") && first_line.contains(" = Table(") {
+        let var_name = first_line.split(" = ").next()?.trim();
+        return Some(var_name.to_string());
+    }
+
+    None
 }
 
 /// Format a server_default expression. Wraps raw SQL in text('...').
@@ -446,5 +567,104 @@ mod tests {
         assert!(is_serial_default("nextval('seq'::regclass)", Dialect::Postgres));
         assert!(!is_serial_default("nextval('seq')", Dialect::Mssql));
         assert!(!is_serial_default("((1))", Dialect::Mssql));
+    }
+
+    #[test]
+    fn test_split_python_declarative() {
+        let full = "\
+from typing import Optional
+
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Users(Base):
+    __tablename__ = 'users'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
+class Posts(Base):
+    __tablename__ = 'posts'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+";
+        let files = split_python_output(full);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+
+        assert!(names.contains(&"base.py"), "missing base.py: {names:?}");
+        assert!(names.contains(&"users.py"), "missing users.py: {names:?}");
+        assert!(names.contains(&"posts.py"), "missing posts.py: {names:?}");
+        assert!(names.contains(&"__init__.py"), "missing __init__.py: {names:?}");
+
+        // base.py should have imports and Base class
+        let base = &files.iter().find(|(n, _)| n == "base.py").unwrap().1;
+        assert!(base.contains("from sqlalchemy"), "base.py missing imports");
+        assert!(base.contains("class Base"), "base.py missing Base class");
+
+        // model files should have from .base import
+        let users = &files.iter().find(|(n, _)| n == "users.py").unwrap().1;
+        assert!(users.contains("from .base import"), "users.py missing base import");
+        assert!(users.contains("__tablename__"), "users.py missing tablename");
+    }
+
+    #[test]
+    fn test_split_python_enum_stays_in_base() {
+        let full = "\
+import enum
+
+from sqlalchemy import Enum, Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class StatusEnum(str, enum.Enum):
+    ACTIVE = 'active'
+    INACTIVE = 'inactive'
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Users(Base):
+    __tablename__ = 'users'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+";
+        let files = split_python_output(full);
+        let base = &files.iter().find(|(n, _)| n == "base.py").unwrap().1;
+        assert!(base.contains("StatusEnum"), "enum should be in base.py");
+
+        // Enum should NOT be split into its own file
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"status_enum.py"), "enum should not be a separate file");
+    }
+
+    #[test]
+    fn test_split_python_tables_generator() {
+        // Tables generator uses double-newline separators
+        let full = "\
+from sqlalchemy import Column, Integer, MetaData, String, Table
+
+metadata = MetaData()
+
+t_users = Table(
+    'users', metadata,
+    Column('id', Integer, primary_key=True)
+)
+
+t_posts = Table(
+    'posts', metadata,
+    Column('id', Integer, primary_key=True)
+)
+";
+        let files = split_python_output(full);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"t_users.py"), "missing t_users.py: {names:?}");
+        assert!(names.contains(&"t_posts.py"), "missing t_posts.py: {names:?}");
     }
 }

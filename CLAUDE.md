@@ -45,11 +45,13 @@ The application follows a pipeline: **CLI parsing -> Connection -> Introspection
 - **`introspect/mysql/`** -- MySQL introspection via sqlx. Queries `information_schema` tables. Same submodule structure as PG. All string columns use `CAST(... AS CHAR)` to avoid MySQL 8+ VARBINARY decoding issues. Connection URLs are automatically appended with `charset=utf8mb4` (via `ensure_mysql_charset()` in `cli.rs`) unless the user specifies a charset.
 - **`introspect/sqlite/`** -- SQLite introspection via sqlx. Uses PRAGMA commands (`pragma_table_info`, `pragma_foreign_key_list`, `pragma_index_list`) and parses CREATE TABLE SQL for AUTOINCREMENT and CHECK constraints.
 - **`typemap/pg.rs`**, **`typemap/mssql.rs`**, **`typemap/mysql.rs`**, **`typemap/sqlite.rs`** -- Map database column types (via `udt_name`) to SQLAlchemy type expressions, Python type annotations, and import requirements. Returns `MappedType`.
-- **`codegen/`** -- `Generator` trait with two implementations:
+- **`codegen/`** -- `Generator` trait with three implementations:
   - `declarative.rs` -- Generates modern SQLAlchemy ORM classes with `Mapped[]` type annotations. Tables without primary keys fall back to `Table()` syntax within the same output.
   - `tables.rs` -- Generates `Table()` metadata objects for all tables.
+  - `ddl.rs` -- Generates raw SQL DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX) for cross-dialect schema migration. Supports schema diff with ALTER statement generation.
   - `imports.rs` -- `ImportCollector` that accumulates, deduplicates, and renders import statements in a specific group order.
-  - `mod.rs` -- Shared helpers: `has_primary_key()`, `is_primary_key_column()`, `topo_sort_tables()` (Kahn's algorithm with alphabetical tiebreak), `format_server_default()`, `escape_python_string()`.
+  - `mod.rs` -- Shared helpers: `has_primary_key()`, `is_primary_key_column()`, `topo_sort_tables()`, `format_server_default()`, `split_python_output()` (for `--split-tables`).
+- **`ddl_typemap/`** -- Cross-dialect type translation via `CanonicalType` intermediate representation. Maps source DB types to target DDL types (e.g., PG `jsonb` → MySQL `JSON`, PG `uuid` → MSSQL `UNIQUEIDENTIFIER`).
 - **`naming.rs`** -- Table/column name transformations: `table_to_class_name()` (UpperCamelCase via `heck`), `table_to_variable_name()` (sanitized `t_` prefix).
 - **`error.rs`** -- `UvgError` enum using `thiserror`.
 
