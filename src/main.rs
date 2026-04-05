@@ -121,12 +121,20 @@ async fn main() -> Result<()> {
 
     match cli.generator.as_str() {
         "tables" => {
-            let output = TablesGenerator.generate(&schema, &options);
-            write_output(&output, &cli.outfile)?;
+            if cli.split_tables {
+                let files = TablesGenerator.generate_split(&schema, &options);
+                write_split_output(&files, &cli.outfile)?;
+            } else {
+                write_output(&TablesGenerator.generate(&schema, &options), &cli.outfile)?;
+            }
         }
         "declarative" => {
-            let output = DeclarativeGenerator.generate(&schema, &options);
-            write_output(&output, &cli.outfile)?;
+            if cli.split_tables {
+                let files = DeclarativeGenerator.generate_split(&schema, &options);
+                write_split_output(&files, &cli.outfile)?;
+            } else {
+                write_output(&DeclarativeGenerator.generate(&schema, &options), &cli.outfile)?;
+            }
         }
         "ddl" => {
             use crate::codegen::ddl::{DdlGenerator, DdlOutput};
@@ -189,6 +197,27 @@ async fn main() -> Result<()> {
         }
     };
 
+    Ok(())
+}
+
+fn write_split_output(files: &[(String, String)], outfile: &Option<String>) -> anyhow::Result<()> {
+    match outfile {
+        Some(ref dir) => {
+            let dir_path = std::path::PathBuf::from(dir);
+            fs::create_dir_all(&dir_path)?;
+            for (filename, content) in files {
+                let path = dir_path.join(filename);
+                fs::write(&path, content)?;
+                tracing::info!("Written {}", path.display());
+            }
+        }
+        None => {
+            for (filename, content) in files {
+                println!("# --- {filename} ---");
+                print!("{content}");
+            }
+        }
+    }
     Ok(())
 }
 

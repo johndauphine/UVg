@@ -39,18 +39,32 @@ uvg --tables users,posts mysql://user:pass@localhost/mydb
 
 # Write to file
 uvg --outfile models.py sqlite:///myapp.db
+
+# One file per table/class
+uvg --split-tables --outfile models/ postgresql://user:pass@localhost/mydb
+
+# Generate DDL for a different database engine
+uvg postgresql://source/db --generator ddl --target-dialect mysql
+
+# Generate DDL with file per table
+uvg postgresql://source/db --generator ddl --target-dialect mysql --split-tables --outfile ddl/
+
+# Diff source against target, emit ALTER statements
+uvg postgresql://source/db mysql://target/db --generator ddl
 ```
 
 ### Options
 
 | Flag | Description |
 |---|---|
-| `--generator <TYPE>` | `declarative` (default) or `tables` |
+| `--generator <TYPE>` | `declarative` (default), `tables`, or `ddl` |
+| `--target-dialect <DIALECT>` | Target SQL dialect for DDL: `postgres`, `mysql`, `sqlite`, `mssql` |
+| `--split-tables` | Output one file per table (works with all generators) |
 | `--tables <LIST>` | Comma-delimited table names to include |
 | `--schemas <LIST>` | Schemas to introspect (default: `public` for PG, `dbo` for MSSQL, database name for MySQL) |
 | `--noviews` | Skip views |
-| `--options <LIST>` | `noindexes`, `noconstraints`, `nocomments`, `use_inflect`, `nojoined`, `nobidi` |
-| `--outfile <PATH>` | Output file (default: stdout) |
+| `--options <LIST>` | `noindexes`, `noconstraints`, `nocomments`, `nobidi`, `nofknames`, `noidsuffix` |
+| `--outfile <PATH>` | Output file or directory (default: stdout) |
 | `--trust-cert` | Trust the server certificate (MSSQL only) |
 
 ## Output Examples

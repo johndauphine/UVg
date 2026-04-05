@@ -11,6 +11,103 @@ use crate::schema::IntrospectedSchema;
 /// Trait for code generators.
 pub trait Generator {
     fn generate(&self, schema: &IntrospectedSchema, options: &GeneratorOptions) -> String;
+
+    /// Generate split output: one file per table/class.
+    /// Returns Vec of (filename, content) pairs.
+    /// Default implementation splits the single output by class/table definitions.
+    fn generate_split(
+        &self,
+        schema: &IntrospectedSchema,
+        options: &GeneratorOptions,
+    ) -> Vec<(String, String)> {
+        let full = self.generate(schema, options);
+        split_python_output(&full)
+    }
+}
+
+/// Split generated Python code into per-file chunks.
+/// Everything before the first model class/Table() assignment goes into base.py.
+/// Each class or t_xxx = Table(...) block becomes its own file.
+/// Returns (filename, content) pairs plus base.py and __init__.py.
+pub fn split_python_output(full: &str) -> Vec<(String, String)> {
+    // Split on triple-newline boundaries (how generators separate blocks)
+    let blocks: Vec<&str> = full.split("\n\n\n").collect();
+
+    let mut base_parts: Vec<&str> = Vec::new();
+    let mut model_files: Vec<(String, String)> = Vec::new();
+
+    for block in &blocks {
+        let trimmed = block.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(name) = extract_model_name(trimmed) {
+            model_files.push((format!("{name}.py"), trimmed.to_string() + "\n"));
+        } else {
+            // Everything else (imports, enum classes, Base/metadata) → base.py
+            base_parts.push(trimmed);
+        }
+    }
+
+    let mut files: Vec<(String, String)> = Vec::new();
+
+    // base.py
+    let base_content = base_parts.join("\n\n") + "\n";
+    files.push(("base.py".to_string(), base_content));
+
+    // Model files
+    let model_names: Vec<String> = model_files.iter().map(|(n, _)| n.clone()).collect();
+    files.extend(model_files);
+
+    // __init__.py re-exports
+    let mut init_lines = vec!["from .base import *  # noqa".to_string()];
+    for name in &model_names {
+        let module = name.strip_suffix(".py").unwrap_or(name);
+        init_lines.push(format!("from .{module} import *  # noqa"));
+    }
+    init_lines.push(String::new());
+    files.push(("__init__.py".to_string(), init_lines.join("\n")));
+
+    files
+}
+
+/// Extract a filename from a code block: class name → snake_case, or t_xxx variable.
+fn extract_model_name(block: &str) -> Option<String> {
+    let first_line = block.lines().next()?;
+
+    // "class Users(Base):" → "users"
+    if first_line.starts_with("class ") && first_line.contains('(') {
+        let class_name = first_line
+            .strip_prefix("class ")?
+            .split('(')
+            .next()?
+            .trim();
+        // Skip "class Base(DeclarativeBase)" — that belongs in base.py
+        if class_name == "Base" {
+            return None;
+        }
+        return Some(to_snake_case(class_name));
+    }
+
+    // "t_post_tags = Table(" → "t_post_tags"
+    if first_line.starts_with("t_") && first_line.contains(" = Table(") {
+        let var_name = first_line.split(" = ").next()?.trim();
+        return Some(var_name.to_string());
+    }
+
+    None
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(c.to_ascii_lowercase());
+    }
+    result
 }
 
 /// Format a server_default expression. Wraps raw SQL in text('...').
