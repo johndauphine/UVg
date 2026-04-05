@@ -7,6 +7,18 @@ pub struct IntrospectedSchema {
     pub tables: Vec<TableInfo>,
     /// Named enum types defined in the database.
     pub enums: Vec<EnumInfo>,
+    /// Domain types defined in the database.
+    pub domains: Vec<DomainInfo>,
+}
+
+/// A PostgreSQL domain type wrapping a base type with constraints.
+#[derive(Debug, Clone)]
+pub struct DomainInfo {
+    pub name: String,
+    pub base_type: String,
+    pub constraint_name: Option<String>,
+    pub not_null: bool,
+    pub check_expression: Option<String>,
 }
 
 /// A named enum type in the database.

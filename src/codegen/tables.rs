@@ -4,7 +4,7 @@ use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
     format_python_string_literal, format_server_default, generate_enum_class,
     is_primary_key_column, is_serial_default, is_standard_sequence_name,
-    is_unique_constraint_index, parse_check_enum, parse_sequence_name,
+    is_unique_constraint_index, parse_check_boolean, parse_check_enum, parse_sequence_name,
     quote_constraint_columns, topo_sort_tables, Generator,
 };
 use crate::schema::EnumInfo;
@@ -29,9 +29,26 @@ impl Generator for TablesGenerator {
         let mut all_enums: Vec<EnumInfo> = schema.enums.clone();
         let mut synthetic_enum_cols: std::collections::HashMap<(String, String), String> =
             std::collections::HashMap::new();
+        // Boolean columns detected from IN (0, 1) check constraints
+        let mut boolean_cols: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        let sorted_tables = topo_sort_tables(&schema.tables);
+
+        // Detect boolean columns from check constraints
+        for table in &sorted_tables {
+            for constraint in &table.constraints {
+                if constraint.constraint_type == ConstraintType::Check {
+                    if let Some(ref expr) = constraint.check_expression {
+                        if let Some(col_name) = parse_check_boolean(expr) {
+                            boolean_cols.insert((table.name.clone(), col_name));
+                        }
+                    }
+                }
+            }
+        }
 
         // Extract synthetic enums from check constraints (unless nosyntheticenums)
-        let sorted_tables = topo_sort_tables(&schema.tables);
         if !options.nosyntheticenums {
         for table in &sorted_tables {
             for constraint in &table.constraints {
@@ -82,6 +99,8 @@ impl Generator for TablesGenerator {
                 schema.dialect,
                 &all_enums,
                 &synthetic_enum_cols,
+                &boolean_cols,
+                &schema.domains,
             );
             table_blocks.push(block);
         }
@@ -126,6 +145,8 @@ fn generate_table(
     dialect: Dialect,
     enums: &[EnumInfo],
     synthetic_enum_cols: &std::collections::HashMap<(String, String), String>,
+    boolean_cols: &std::collections::HashSet<(String, String)>,
+    schema_domains: &[crate::schema::DomainInfo],
 ) -> String {
     let var_name = table_to_variable_name(&table.name);
     let mut lines: Vec<String> = Vec::new();
@@ -141,9 +162,14 @@ fn generate_table(
         let mut col_args: Vec<String> = Vec::new();
         col_args.push(format!("'{}'", col.name));
 
+        // Check if column is a boolean (detected from IN (0, 1) check)
+        let bool_key = (table.name.clone(), col.name.clone());
+        if boolean_cols.contains(&bool_key) {
+            imports.add("sqlalchemy", "Boolean");
+            col_args.push("Boolean".to_string());
+        }
         // Check if column has a synthetic enum from check constraint
-        let synthetic_key = (table.name.clone(), col.name.clone());
-        if let Some(class_name) = synthetic_enum_cols.get(&synthetic_key) {
+        else if let Some(class_name) = synthetic_enum_cols.get(&bool_key) {
             col_args.push(format!(
                 "Enum({class_name}, values_callable=lambda cls: [member.value for member in cls])"
             ));
@@ -167,12 +193,39 @@ fn generate_table(
             }
             col_args.push(format!("Enum({})", enum_parts.join(", ")));
         } else {
-            let mapped = map_column_type(col, dialect);
-            imports.add(&mapped.import_module, &mapped.import_name);
-            if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
-                imports.add(elem_mod, elem_name);
+            // Check for domain type — resolve to DOMAIN('name', BaseType(), ...)
+            let domain = schema_domains.iter().find(|d| d.name == col.udt_name);
+            if let Some(di) = domain {
+                imports.add("sqlalchemy.dialects.postgresql", "DOMAIN");
+                // Resolve base type
+                let base_col = crate::schema::ColumnInfo {
+                    udt_name: di.base_type.clone(),
+                    ..col.clone()
+                };
+                let base_mapped = map_column_type(&base_col, dialect);
+                imports.add(&base_mapped.import_module, &base_mapped.import_name);
+
+                let mut domain_args = vec![
+                    format_python_string_literal(&di.name),
+                    format!("{}()", base_mapped.sa_type),
+                ];
+                if let Some(ref cn) = di.constraint_name {
+                    domain_args.push(format!("constraint_name={}", format_python_string_literal(cn)));
+                }
+                domain_args.push(format!("not_null={}", if di.not_null { "True" } else { "False" }));
+                if let Some(ref check) = di.check_expression {
+                    imports.add("sqlalchemy", "text");
+                    domain_args.push(format!("check={}", format_server_default(check, dialect)));
+                }
+                col_args.push(format!("DOMAIN({})", domain_args.join(", ")));
+            } else {
+                let mapped = map_column_type(col, dialect);
+                imports.add(&mapped.import_module, &mapped.import_name);
+                if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
+                    imports.add(elem_mod, elem_name);
+                }
+                col_args.push(mapped.sa_type.clone());
             }
-            col_args.push(mapped.sa_type.clone());
         }
 
         // Identity — dialect-aware output
@@ -262,6 +315,10 @@ fn generate_table(
         for constraint in &table.constraints {
             if constraint.constraint_type == ConstraintType::Check {
                 if let Some(ref expr) = constraint.check_expression {
+                    // Skip boolean detection check constraints (already handled as Boolean type)
+                    if parse_check_boolean(expr).is_some() {
+                        continue;
+                    }
                     imports.add("sqlalchemy", "CheckConstraint");
                     let expr_literal = format_python_string_literal(expr);
                     if constraint.name.is_empty() {
@@ -1033,5 +1090,100 @@ mod tests {
         // Each table gets its own enum class
         assert!(output.contains("class Table1Status(str, enum.Enum):"));
         assert!(output.contains("class Table2Status(str, enum.Enum):"));
+    }
+
+    // --- PR 12: Boolean detection and domain tests ---
+
+    /// Adapted from sqlacodegen test_boolean_detection.
+    #[test]
+    fn test_tables_boolean_detection() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("bool1").nullable().build())
+                .column(col("bool2").udt("int2").nullable().build())
+                .check("", "simple_items.bool1 IN (0, 1)")
+                .check("", "simple_items.bool2 IN (0, 1)")
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('bool1', Boolean)"));
+        assert!(output.contains("Column('bool2', Boolean)"));
+        // Check constraints suppressed (boolean detection consumed them)
+        assert!(!output.contains("CheckConstraint"));
+        assert!(output.contains("from sqlalchemy import Boolean"));
+    }
+
+    /// Adapted from sqlacodegen test_schema_boolean.
+    #[test]
+    fn test_tables_schema_boolean() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .schema("testschema")
+                .column(col("bool1").nullable().build())
+                .check("", "testschema.simple_items.bool1 IN (0, 1)")
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('bool1', Boolean)"));
+        assert!(output.contains("schema='testschema'"));
+    }
+
+    /// Adapted from sqlacodegen test_domain_text.
+    #[test]
+    fn test_tables_domain_text() {
+        use crate::schema::{DomainInfo, IntrospectedSchema};
+        let schema = IntrospectedSchema {
+            dialect: crate::dialect::Dialect::Postgres,
+            tables: vec![
+                table("simple_items")
+                    .column(col("postal_code").udt("us_postal_code").build())
+                    .build(),
+            ],
+            enums: vec![],
+            domains: vec![DomainInfo {
+                name: "us_postal_code".to_string(),
+                base_type: "text".to_string(),
+                constraint_name: Some("valid_us_postal_code".to_string()),
+                not_null: false,
+                check_expression: Some("VALUE ~ '^\\d{5}$'".to_string()),
+            }],
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("DOMAIN("));
+        assert!(output.contains("'us_postal_code'"));
+        assert!(output.contains("Text()"));
+        assert!(output.contains("constraint_name='valid_us_postal_code'"));
+        assert!(output.contains("from sqlalchemy.dialects.postgresql import DOMAIN"));
+    }
+
+    /// Adapted from sqlacodegen test_domain_int.
+    #[test]
+    fn test_tables_domain_int() {
+        use crate::schema::{DomainInfo, IntrospectedSchema};
+        let schema = IntrospectedSchema {
+            dialect: crate::dialect::Dialect::Postgres,
+            tables: vec![
+                table("simple_items")
+                    .column(col("n").udt("positive_int").build())
+                    .build(),
+            ],
+            enums: vec![],
+            domains: vec![DomainInfo {
+                name: "positive_int".to_string(),
+                base_type: "int4".to_string(),
+                constraint_name: Some("positive".to_string()),
+                not_null: false,
+                check_expression: Some("VALUE > 0".to_string()),
+            }],
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("DOMAIN("));
+        assert!(output.contains("'positive_int'"));
+        assert!(output.contains("Integer()"));
+        assert!(output.contains("constraint_name='positive'"));
     }
 }

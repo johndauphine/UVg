@@ -43,5 +43,6 @@ pub async fn introspect(
         dialect: Dialect::Postgres,
         tables: all_tables,
         enums: vec![],
+        domains: vec![],
     })
 }

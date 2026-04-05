@@ -203,6 +203,49 @@ pub fn parse_check_enum(expression: &str) -> Option<(String, Vec<String>)> {
     Some((col_name.to_string(), values))
 }
 
+/// Check if a check constraint expression represents a boolean column.
+/// Returns the column name if the expression matches `[schema.][table.]column IN (0, 1)`.
+pub fn parse_check_boolean(expression: &str) -> Option<String> {
+    let expr = expression.trim();
+
+    let needle = b" IN (";
+    let in_pos = expr
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(needle.iter())
+                .all(|(b, n)| b.to_ascii_uppercase() == *n)
+        })?;
+    let col_part = expr[..in_pos].trim();
+
+    // Extract column name (strip optional schema.table prefix)
+    let col_name = if let Some(dot_pos) = col_part.rfind('.') {
+        col_part[dot_pos + 1..].trim()
+    } else {
+        col_part
+    };
+
+    let list_start = in_pos + 4;
+    let list_str = expr[list_start..].trim();
+    if !list_str.starts_with('(') || !list_str.ends_with(')') {
+        return None;
+    }
+
+    let inner = &list_str[1..list_str.len() - 1];
+    let items: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+
+    // Must be exactly (0, 1) in any order
+    if items.len() == 2
+        && ((items[0] == "0" && items[1] == "1") || (items[0] == "1" && items[1] == "0"))
+    {
+        Some(col_name.to_string())
+    } else {
+        None
+    }
+}
+
 /// Generate a Python enum class from an EnumInfo.
 /// Returns the class definition string (e.g. "class StatusEnum(str, enum.Enum):\n    ...").
 pub fn generate_enum_class(enum_info: &crate::schema::EnumInfo) -> String {

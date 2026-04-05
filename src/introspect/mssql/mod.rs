@@ -75,5 +75,6 @@ pub async fn introspect(
         dialect: Dialect::Mssql,
         tables: all_tables,
         enums: vec![],
+        domains: vec![],
     })
 }
