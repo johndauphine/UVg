@@ -16,7 +16,7 @@ use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
 use crate::naming::{column_to_attr_name, table_to_class_name, table_to_variable_name};
 use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
-use crate::typemap::map_column_type;
+use crate::typemap::{map_column_type, map_column_type_dialect};
 
 pub struct DeclarativeGenerator;
 
@@ -283,7 +283,11 @@ fn generate_class(
             let sa = format!("Enum({})", enum_parts.join(", "));
             (sa, cls)
         } else {
-            let mapped = map_column_type(col, dialect);
+            let mapped = if options.keep_dialect_types {
+                map_column_type_dialect(col, dialect)
+            } else {
+                map_column_type(col, dialect)
+            };
             imports.add(&mapped.import_module, &mapped.import_name);
             if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
                 imports.add(elem_mod, elem_name);
@@ -692,7 +696,11 @@ fn generate_association_table(
                 body_items.push(format!("Column('{}', ForeignKey('{}'))", col_info.name, target));
             }
         } else {
-            let mapped = map_column_type(col_info, dialect);
+            let mapped = if options.keep_dialect_types {
+                map_column_type_dialect(col_info, dialect)
+            } else {
+                map_column_type(col_info, dialect)
+            };
             imports.add(&mapped.import_module, &mapped.import_name);
             body_items.push(format!("Column('{}', {})", col_info.name, mapped.sa_type));
         }
@@ -733,7 +741,11 @@ fn generate_table_fallback(
     let mut body_items: Vec<String> = Vec::new();
 
     for col in &table.columns {
-        let mapped = map_column_type(col, dialect);
+        let mapped = if options.keep_dialect_types {
+            map_column_type_dialect(col, dialect)
+        } else {
+            map_column_type(col, dialect)
+        };
         imports.add(&mapped.import_module, &mapped.import_name);
         if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
             imports.add(elem_mod, elem_name);

@@ -2,6 +2,121 @@ use crate::schema::ColumnInfo;
 
 use super::{simple, MappedType};
 
+/// Map a PostgreSQL column keeping dialect-specific types.
+/// Used when keep_dialect_types option is set.
+pub fn map_column_type_dialect(col: &ColumnInfo) -> MappedType {
+    let udt = col.udt_name.as_str();
+
+    if udt.is_empty() {
+        return MappedType {
+            sa_type: "NullType".to_string(),
+            python_type: "str".to_string(),
+            import_module: "sqlalchemy.sql.sqltypes".to_string(),
+            import_name: "NullType".to_string(),
+            element_import: None,
+        };
+    }
+
+    if let Some(element_udt) = udt.strip_prefix('_') {
+        let element = map_udt_scalar_dialect(element_udt, col);
+        return MappedType {
+            sa_type: format!("ARRAY({})", element.sa_type),
+            python_type: "list".to_string(),
+            import_module: "sqlalchemy".to_string(),
+            import_name: "ARRAY".to_string(),
+            element_import: Some((element.import_module, element.import_name)),
+        };
+    }
+
+    map_udt_scalar_dialect(udt, col)
+}
+
+/// Map PG scalar type keeping dialect-specific types.
+fn map_udt_scalar_dialect(udt: &str, col: &ColumnInfo) -> MappedType {
+    let pg = "sqlalchemy.dialects.postgresql";
+    match udt {
+        "bool" => simple("BOOLEAN", "bool", pg),
+        "int2" => simple("SMALLINT", "int", pg),
+        "int4" | "serial" => simple("INTEGER", "int", pg),
+        "int8" | "bigserial" => simple("BIGINT", "int", pg),
+        "float4" => simple("REAL", "float", pg),
+        "float8" => simple("DOUBLE_PRECISION", "float", pg),
+        "numeric" => {
+            let sa_type = match (col.numeric_precision, col.numeric_scale) {
+                (Some(p), Some(s)) => format!("NUMERIC({p}, {s})"),
+                (Some(p), None) => format!("NUMERIC({p})"),
+                _ => "NUMERIC".to_string(),
+            };
+            MappedType {
+                sa_type,
+                python_type: "decimal.Decimal".to_string(),
+                import_module: pg.to_string(),
+                import_name: "NUMERIC".to_string(),
+                element_import: None,
+            }
+        }
+        "text" => simple("TEXT", "str", pg),
+        "varchar" => {
+            let sa_type = match col.character_maximum_length {
+                Some(n) => format!("VARCHAR({n})"),
+                None => "VARCHAR".to_string(),
+            };
+            MappedType {
+                sa_type,
+                python_type: "str".to_string(),
+                import_module: pg.to_string(),
+                import_name: "VARCHAR".to_string(),
+                element_import: None,
+            }
+        }
+        "char" | "bpchar" => {
+            let sa_type = match col.character_maximum_length {
+                Some(n) => format!("CHAR({n})"),
+                None => "CHAR".to_string(),
+            };
+            MappedType {
+                sa_type,
+                python_type: "str".to_string(),
+                import_module: pg.to_string(),
+                import_name: "CHAR".to_string(),
+                element_import: None,
+            }
+        }
+        "bytea" => simple("BYTEA", "bytes", pg),
+        "timestamp" => simple("TIMESTAMP", "datetime.datetime", pg),
+        "timestamptz" => MappedType {
+            sa_type: "TIMESTAMP(timezone=True)".to_string(),
+            python_type: "datetime.datetime".to_string(),
+            import_module: pg.to_string(),
+            import_name: "TIMESTAMP".to_string(),
+            element_import: None,
+        },
+        "date" => simple("DATE", "datetime.date", pg),
+        "time" => simple("TIME", "datetime.time", pg),
+        "timetz" => MappedType {
+            sa_type: "TIME(timezone=True)".to_string(),
+            python_type: "datetime.time".to_string(),
+            import_module: pg.to_string(),
+            import_name: "TIME".to_string(),
+            element_import: None,
+        },
+        "interval" => simple("INTERVAL", "datetime.timedelta", pg),
+        // These are already dialect-specific — same as regular mapping
+        "uuid" => simple("UUID", "uuid.UUID", pg),
+        "json" => simple("JSON", "dict", pg),
+        "jsonb" => simple("JSONB", "dict", pg),
+        "inet" => simple("INET", "str", pg),
+        "cidr" => simple("CIDR", "str", pg),
+        other => MappedType {
+            sa_type: other.to_uppercase(),
+            python_type: "str".to_string(),
+            import_module: pg.to_string(),
+            import_name: other.to_uppercase(),
+            element_import: None,
+        },
+    }
+}
+
 /// Map a PostgreSQL column to its SQLAlchemy type representation.
 pub fn map_column_type(col: &ColumnInfo) -> MappedType {
     let udt = col.udt_name.as_str();
