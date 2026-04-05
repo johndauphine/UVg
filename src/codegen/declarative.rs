@@ -1968,4 +1968,28 @@ mod tests {
         assert!(output.contains("ForeignKeyConstraint("));
         assert!(!output.contains("name='si_c1_fkey'"));
     }
+
+    /// Adapted from sqlacodegen test_synthetic_enum_nosyntheticenums_option (declarative).
+    #[test]
+    fn test_declarative_synthetic_enum_nosyntheticenums() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("status").udt("varchar").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .check("", "simple_items.status IN ('active', 'inactive')")
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nosyntheticenums: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // No enum class generated
+        assert!(!output.contains("class SimpleItemsStatus"));
+        assert!(!output.contains("import enum"));
+        // Column uses regular type
+        assert!(output.contains("mapped_column(String)"));
+    }
 }

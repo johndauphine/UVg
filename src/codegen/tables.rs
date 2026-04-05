@@ -38,20 +38,19 @@ impl Generator for TablesGenerator {
                 if constraint.constraint_type == ConstraintType::Check {
                     if let Some(ref expr) = constraint.check_expression {
                         if let Some((col_name, values)) = parse_check_enum(expr) {
-                            use heck::ToUpperCamelCase;
-                            let enum_name =
-                                format!("{}_{}", table.name, col_name).to_upper_camel_case();
-                            let ei = EnumInfo {
-                                name: enum_name.clone(),
-                                schema: None,
-                                values,
-                            };
-                            all_enums.push(ei);
-                            let class_name = enum_name;
-                            synthetic_enum_cols.insert(
-                                (table.name.clone(), col_name),
-                                class_name,
-                            );
+                            let key = (table.name.clone(), col_name.clone());
+                            if !synthetic_enum_cols.contains_key(&key) {
+                                use heck::ToUpperCamelCase;
+                                let enum_name =
+                                    format!("{}_{}", table.name, col_name).to_upper_camel_case();
+                                let ei = EnumInfo {
+                                    name: enum_name.clone(),
+                                    schema: None,
+                                    values,
+                                };
+                                all_enums.push(ei);
+                                synthetic_enum_cols.insert(key, enum_name);
+                            }
                         }
                     }
                 }

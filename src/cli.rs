@@ -27,7 +27,7 @@ pub struct Cli {
     #[arg(long)]
     pub noviews: bool,
 
-    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments, nobidi, nofknames, noidsuffix
+    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments, nobidi, nofknames, noidsuffix, nosyntheticenums, nonativeenums
     #[arg(long)]
     pub options: Option<String>,
 
