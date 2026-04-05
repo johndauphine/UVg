@@ -900,4 +900,87 @@ mod tests {
         assert!(output.contains("Column('id', Integer, primary_key=True)"));
         assert!(output.contains("server_default=text('1 + 2')"));
     }
+
+    // --- PR 8: Misc feature tests ---
+
+    /// Adapted from sqlacodegen test_column_adaptation.
+    /// PG dialect types should map to generic SA types via udt_name.
+    #[test]
+    fn test_tables_column_adaptation() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").udt("int8").nullable().build())
+                .column(col("length").udt("float8").nullable().build())
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('id', BigInteger)"));
+        assert!(output.contains("Column('length', Double)"));
+        assert!(output.contains("BigInteger"));
+        assert!(output.contains("Double"));
+    }
+
+    /// Adapted from sqlacodegen test_jsonb_default.
+    /// Plain JSONB column (no parameters).
+    #[test]
+    fn test_tables_jsonb_default() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("jsonb").udt("jsonb").nullable().build())
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('jsonb', JSONB)"));
+        assert!(output.contains("from sqlalchemy.dialects.postgresql import JSONB"));
+    }
+
+    /// Adapted from sqlacodegen test_json_default.
+    /// Plain JSON column.
+    #[test]
+    fn test_tables_json_default() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("json").udt("json").nullable().build())
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('json', JSON)"));
+        assert!(output.contains("from sqlalchemy.dialects.postgresql import JSON"));
+    }
+
+    /// Adapted from sqlacodegen test_arrays (basic).
+    /// Integer array column.
+    #[test]
+    fn test_tables_arrays() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("int_array").udt("_int4").nullable().build())
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("Column('int_array', ARRAY(Integer))"));
+        assert!(output.contains("from sqlalchemy import ARRAY"));
+    }
+
+    /// Adapted from sqlacodegen test_check_constraint_preserved.
+    /// Check constraint preserved in output (not consumed by synthetic enum).
+    #[test]
+    fn test_tables_check_constraint_preserved() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("status").udt("varchar").max_length(255).nullable().build())
+                .check("", "simple_items.status IN ('A', 'B', 'C')")
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Check constraint is preserved
+        assert!(output.contains("CheckConstraint("));
+        // Synthetic enum is also generated
+        assert!(output.contains("class SimpleItemsStatus(str, enum.Enum):"));
+    }
 }
