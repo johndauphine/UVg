@@ -229,16 +229,24 @@ fn extract_check_expression(s: &str) -> Option<String> {
     None
 }
 
-/// Split a string by commas but respect nested parentheses.
+/// Split a string by commas, respecting nested parentheses and quoted strings.
 fn split_respecting_parens(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
-    let mut depth = 0;
+    let mut depth: i32 = 0;
+    let mut in_quote = false;
     let mut start = 0;
 
     for (i, ch) in s.char_indices() {
+        if in_quote {
+            if ch == '\'' {
+                in_quote = false;
+            }
+            continue;
+        }
         match ch {
+            '\'' => in_quote = true,
             '(' => depth += 1,
-            ')' => depth -= 1,
+            ')' => depth = (depth - 1).max(0),
             ',' if depth == 0 => {
                 result.push(&s[start..i]);
                 start = i + 1;
@@ -338,5 +346,23 @@ mod tests {
         assert_eq!(normalize_fk_rule("NO ACTION"), "NO ACTION");
         assert_eq!(normalize_fk_rule("SET NULL"), "SET NULL");
         assert_eq!(normalize_fk_rule(""), "NO ACTION");
+    }
+
+    #[test]
+    fn test_split_respecting_parens_with_quoted_comma() {
+        // Commas inside string literals should not split
+        let result = split_respecting_parens("a TEXT DEFAULT 'x,y', b INTEGER");
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("'x,y'"));
+        assert!(result[1].contains("b INTEGER"));
+    }
+
+    #[test]
+    fn test_parse_check_with_default_containing_comma() {
+        let sql =
+            "CREATE TABLE t (id INTEGER, label TEXT DEFAULT 'a,b', CHECK(id > 0))";
+        let checks = parse_check_constraints(sql);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].check_expression.as_deref(), Some("id > 0"));
     }
 }
