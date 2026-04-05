@@ -162,9 +162,10 @@ fn generate_table(
         let mut col_args: Vec<String> = Vec::new();
         col_args.push(format!("'{}'", col.name));
 
-        // Check if column is a boolean (detected from IN (0, 1) check)
+        // Check if column is a boolean (detected from IN (0, 1) check on integer types)
         let bool_key = (table.name.clone(), col.name.clone());
-        if boolean_cols.contains(&bool_key) {
+        let is_integer_type = matches!(col.udt_name.as_str(), "int2" | "int4" | "int8" | "integer" | "smallint" | "bigint" | "tinyint" | "int");
+        if boolean_cols.contains(&bool_key) && is_integer_type {
             imports.add("sqlalchemy", "Boolean");
             col_args.push("Boolean".to_string());
         }
@@ -193,8 +194,12 @@ fn generate_table(
             }
             col_args.push(format!("Enum({})", enum_parts.join(", ")));
         } else {
-            // Check for domain type — resolve to DOMAIN('name', BaseType(), ...)
-            let domain = schema_domains.iter().find(|d| d.name == col.udt_name);
+            // Check for domain type — resolve to DOMAIN('name', BaseType(), ...) (PG only)
+            let domain = if dialect == Dialect::Postgres {
+                schema_domains.iter().find(|d| d.name == col.udt_name)
+            } else {
+                None
+            };
             if let Some(di) = domain {
                 imports.add("sqlalchemy.dialects.postgresql", "DOMAIN");
                 // Resolve base type
@@ -1144,6 +1149,7 @@ mod tests {
             enums: vec![],
             domains: vec![DomainInfo {
                 name: "us_postal_code".to_string(),
+                schema: None,
                 base_type: "text".to_string(),
                 constraint_name: Some("valid_us_postal_code".to_string()),
                 not_null: false,
@@ -1173,6 +1179,7 @@ mod tests {
             enums: vec![],
             domains: vec![DomainInfo {
                 name: "positive_int".to_string(),
+                schema: None,
                 base_type: "int4".to_string(),
                 constraint_name: Some("positive".to_string()),
                 not_null: false,

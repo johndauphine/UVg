@@ -15,6 +15,7 @@ pub struct IntrospectedSchema {
 #[derive(Debug, Clone)]
 pub struct DomainInfo {
     pub name: String,
+    pub schema: Option<String>,
     pub base_type: String,
     pub constraint_name: Option<String>,
     pub not_null: bool,
