@@ -26,8 +26,8 @@ pub struct Cli {
     #[arg(long)]
     pub split_tables: bool,
 
-    /// Execute DDL on the target database (requires target URL)
-    #[arg(long)]
+    /// Execute DDL on the target database (requires target URL). Reserved for future use.
+    #[arg(long, hide = true)]
     pub apply: bool,
 
     /// Tables to process (comma-delimited)

@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use crate::cli::DdlOptions;
 use crate::codegen::{
-    has_primary_key, is_primary_key_column, is_serial_default, is_unique_constraint_index,
-    topo_sort_tables,
+    is_primary_key_column, is_serial_default, is_unique_constraint_index, topo_sort_tables,
 };
 use crate::ddl_typemap;
 use crate::dialect::Dialect;
@@ -26,9 +25,6 @@ impl DdlGenerator {
         target_schema: Option<&IntrospectedSchema>,
         options: &DdlOptions,
     ) -> DdlOutput {
-        let source_dialect = schema.dialect;
-        let target_dialect = options.target_dialect;
-
         match target_schema {
             Some(target) => {
                 let ddl = diff_schemas(schema, target, options);
@@ -131,12 +127,24 @@ fn generate_create_table(
     let qname = qualified_table_name(&table.schema, &table.name, target_dialect);
     let mut parts: Vec<String> = Vec::new();
 
+    // Detect if any column has inline PK AUTOINCREMENT (SQLite)
+    let has_inline_pk = target_dialect == Dialect::Sqlite
+        && table.columns.iter().any(|col| {
+            let is_auto = col.is_identity
+                || col.autoincrement == Some(true)
+                || col
+                    .column_default
+                    .as_deref()
+                    .map(|d| is_serial_default(d, source_dialect))
+                    .unwrap_or(false);
+            is_auto && is_primary_key_column(&col.name, &table.constraints)
+        });
+
     // Columns
     for col in &table.columns {
         parts.push(generate_column_def(
             col,
             &table.constraints,
-            &table.name,
             source_dialect,
             target_dialect,
         ));
@@ -144,19 +152,21 @@ fn generate_create_table(
 
     // Constraints
     if !options.noconstraints {
-        // Primary key
-        for c in &table.constraints {
-            if c.constraint_type == ConstraintType::PrimaryKey {
-                let cols: Vec<String> = c
-                    .columns
-                    .iter()
-                    .map(|col| quote_identifier(col, target_dialect))
-                    .collect();
-                parts.push(format!(
-                    "    CONSTRAINT {} PRIMARY KEY ({})",
-                    quote_identifier(&c.name, target_dialect),
-                    cols.join(", ")
-                ));
+        // Primary key (suppress if SQLite auto-increment already emitted inline PK)
+        if !has_inline_pk {
+            for c in &table.constraints {
+                if c.constraint_type == ConstraintType::PrimaryKey {
+                    let cols: Vec<String> = c
+                        .columns
+                        .iter()
+                        .map(|col| quote_identifier(col, target_dialect))
+                        .collect();
+                    parts.push(format!(
+                        "    CONSTRAINT {} PRIMARY KEY ({})",
+                        quote_identifier(&c.name, target_dialect),
+                        cols.join(", ")
+                    ));
+                }
             }
         }
 
@@ -244,7 +254,6 @@ fn generate_create_table(
 fn generate_column_def(
     col: &ColumnInfo,
     constraints: &[ConstraintInfo],
-    table_name: &str,
     source_dialect: Dialect,
     target_dialect: Dialect,
 ) -> String {
@@ -284,11 +293,18 @@ fn generate_column_def(
         }
     }
 
-    // Auto-increment suffix (MySQL, MSSQL)
+    // Auto-increment suffix (MySQL, MSSQL, SQLite)
     if is_auto {
-        let suffix = format_autoincrement_suffix(col, target_dialect);
+        let suffix = format_autoincrement_suffix(col, target_dialect, is_pk);
         if !suffix.is_empty() {
             parts.push(suffix);
+        }
+    }
+
+    // MySQL inline column comment
+    if target_dialect == Dialect::Mysql {
+        if let Some(ref comment) = col.comment {
+            parts.push(format!("COMMENT '{}'", comment.replace('\'', "''")));
         }
     }
 
@@ -322,11 +338,16 @@ fn format_autoincrement_type(
 }
 
 /// Get the auto-increment suffix to append after the type.
-fn format_autoincrement_suffix(col: &ColumnInfo, target_dialect: Dialect) -> String {
+fn format_autoincrement_suffix(
+    col: &ColumnInfo,
+    target_dialect: Dialect,
+    is_pk: bool,
+) -> String {
     match target_dialect {
         Dialect::Postgres => String::new(), // SERIAL/BIGSERIAL handles it
         Dialect::Mysql => "AUTO_INCREMENT".to_string(),
-        Dialect::Sqlite => "AUTOINCREMENT".to_string(),
+        Dialect::Sqlite if is_pk => "PRIMARY KEY AUTOINCREMENT".to_string(),
+        Dialect::Sqlite => String::new(),
         Dialect::Mssql => {
             let (start, inc) = col
                 .identity
@@ -483,10 +504,17 @@ fn diff_schemas(
     let source_dialect = source.dialect;
     let target_dialect = options.target_dialect;
 
-    let source_map: HashMap<&str, &TableInfo> =
-        source.tables.iter().map(|t| (t.name.as_str(), t)).collect();
-    let target_map: HashMap<&str, &TableInfo> =
-        target.tables.iter().map(|t| (t.name.as_str(), t)).collect();
+    // Key by (schema, table_name) to handle multi-schema introspection
+    let source_map: HashMap<(&str, &str), &TableInfo> = source
+        .tables
+        .iter()
+        .map(|t| ((t.schema.as_str(), t.name.as_str()), t))
+        .collect();
+    let target_map: HashMap<(&str, &str), &TableInfo> = target
+        .tables
+        .iter()
+        .map(|t| ((t.schema.as_str(), t.name.as_str()), t))
+        .collect();
 
     let mut stmts: Vec<String> = Vec::new();
 
@@ -496,7 +524,8 @@ fn diff_schemas(
         if table.table_type != TableType::Table {
             continue;
         }
-        if !target_map.contains_key(table.name.as_str()) {
+        let key = (table.schema.as_str(), table.name.as_str());
+        if !target_map.contains_key(&key) {
             stmts.push(generate_create_table(
                 table,
                 source_dialect,
@@ -514,7 +543,8 @@ fn diff_schemas(
         if table.table_type != TableType::Table {
             continue;
         }
-        if let Some(target_table) = target_map.get(table.name.as_str()) {
+        let key = (table.schema.as_str(), table.name.as_str());
+        if let Some(target_table) = target_map.get(&key) {
             let alters = diff_table_columns(
                 table,
                 target_table,
@@ -526,14 +556,14 @@ fn diff_schemas(
     }
 
     // Dropped tables (in target, not in source)
-    let mut dropped: Vec<&str> = target_map
+    let mut dropped: Vec<(&str, &str)> = target_map
         .keys()
-        .filter(|name| !source_map.contains_key(*name))
+        .filter(|key| !source_map.contains_key(*key))
         .copied()
         .collect();
     dropped.sort();
-    for name in dropped {
-        let qname = quote_identifier(name, target_dialect);
+    for (schema, name) in dropped {
+        let qname = qualified_table_name(schema, name, target_dialect);
         stmts.push(format!("-- WARNING: destructive operation\nDROP TABLE IF EXISTS {qname};"));
     }
 
@@ -555,7 +585,7 @@ fn diff_table_columns(
     target_dialect: Dialect,
 ) -> Vec<String> {
     let mut stmts = Vec::new();
-    let tname = quote_identifier(&source.name, target_dialect);
+    let tname = qualified_table_name(&source.schema, &source.name, target_dialect);
 
     let source_cols: HashMap<&str, &ColumnInfo> =
         source.columns.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -568,20 +598,23 @@ fn diff_table_columns(
             let col_def = generate_column_def(
                 col,
                 &source.constraints,
-                &source.name,
                 source_dialect,
                 target_dialect,
             );
             // Strip leading whitespace from column def
             let col_def = col_def.trim();
-            stmts.push(format!("ALTER TABLE {tname} ADD COLUMN {col_def};"));
+            let add_clause = match target_dialect {
+                Dialect::Mssql => "ADD",
+                _ => "ADD COLUMN",
+            };
+            stmts.push(format!("ALTER TABLE {tname} {add_clause} {col_def};"));
         }
     }
 
     // Modified columns (in both): check type, nullable, default
     for col in &source.columns {
         if let Some(target_col) = target_cols.get(col.name.as_str()) {
-            let alters = diff_column(col, target_col, &source.name, source_dialect, target_dialect);
+            let alters = diff_column(col, target_col, &source.schema, &source.name, source_dialect, target_dialect);
             stmts.extend(alters);
         }
     }
@@ -604,15 +637,17 @@ fn diff_table_columns(
 }
 
 /// Compare a single column and emit ALTER statements if different.
+/// Compares type, nullability, and default values.
 fn diff_column(
     source: &ColumnInfo,
     target: &ColumnInfo,
+    table_schema: &str,
     table_name: &str,
     source_dialect: Dialect,
     target_dialect: Dialect,
 ) -> Vec<String> {
     let mut stmts = Vec::new();
-    let tname = quote_identifier(table_name, target_dialect);
+    let tname = qualified_table_name(table_schema, table_name, target_dialect);
     let cname = quote_identifier(&source.name, target_dialect);
 
     let source_type = ddl_typemap::map_ddl_type(source, source_dialect, target_dialect);
@@ -621,7 +656,18 @@ fn diff_column(
     let type_changed = source_type.sql_type != target_type.sql_type;
     let nullable_changed = source.is_nullable != target.is_nullable;
 
-    if !type_changed && !nullable_changed {
+    // Compare defaults (strip dialect-specific syntax before comparing)
+    let source_default = source
+        .column_default
+        .as_deref()
+        .map(|d| format_ddl_default(d, source_dialect, target_dialect));
+    let target_default = target
+        .column_default
+        .as_deref()
+        .map(|d| format_ddl_default(d, target_dialect, target_dialect));
+    let default_changed = source_default != target_default;
+
+    if !type_changed && !nullable_changed && !default_changed {
         return stmts;
     }
 
@@ -642,6 +688,16 @@ fn diff_column(
                     stmts.push(format!(
                         "ALTER TABLE {tname} ALTER COLUMN {cname} SET NOT NULL;"
                     ));
+                }
+            }
+            if default_changed {
+                match &source_default {
+                    Some(d) => stmts.push(format!(
+                        "ALTER TABLE {tname} ALTER COLUMN {cname} SET DEFAULT {d};"
+                    )),
+                    None => stmts.push(format!(
+                        "ALTER TABLE {tname} ALTER COLUMN {cname} DROP DEFAULT;"
+                    )),
                 }
             }
         }

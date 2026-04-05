@@ -166,11 +166,12 @@ async fn main() -> Result<()> {
                 DdlOutput::Split(files) => {
                     match cli.outfile {
                         Some(ref dir) => {
-                            fs::create_dir_all(dir)?;
+                            let dir_path = std::path::PathBuf::from(dir);
+                            fs::create_dir_all(&dir_path)?;
                             for (filename, content) in &files {
-                                let path = format!("{dir}/{filename}");
+                                let path = dir_path.join(filename);
                                 fs::write(&path, content)?;
-                                tracing::info!("Written {path}");
+                                tracing::info!("Written {}", path.display());
                             }
                         }
                         None => {
