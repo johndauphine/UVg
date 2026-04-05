@@ -7,11 +7,6 @@ fn is_tinyint_bool(col: &ColumnInfo) -> bool {
     col.udt_name == "tinyint" && col.data_type.starts_with("tinyint(1)")
 }
 
-/// Check if a MySQL COLUMN_TYPE indicates unsigned.
-fn is_unsigned(col: &ColumnInfo) -> bool {
-    col.data_type.contains("unsigned")
-}
-
 /// Parse ENUM or SET values from a COLUMN_TYPE string like "enum('a','b','c')".
 fn parse_values(column_type: &str) -> Vec<String> {
     let start = match column_type.find('(') {
@@ -99,7 +94,16 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
         "set" => CanonicalType::Raw {
             type_name: col.data_type.to_uppercase(),
         },
-        "bit" => CanonicalType::Boolean,
+        "bit" => {
+            // BIT(1) is boolean; BIT(n) preserves width
+            if col.numeric_precision.unwrap_or(1) == 1 {
+                CanonicalType::Boolean
+            } else {
+                CanonicalType::Raw {
+                    type_name: col.data_type.to_uppercase(),
+                }
+            }
+        }
         "boolean" | "bool" => CanonicalType::Boolean,
         _ => CanonicalType::Raw {
             type_name: udt.to_uppercase(),
@@ -142,7 +146,10 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         CanonicalType::Json => DdlType::exact("JSON"),
         CanonicalType::Jsonb => DdlType::approx("JSON", "JSONB binary indexing not available in MySQL"),
         CanonicalType::Enum { values } => {
-            let quoted: Vec<String> = values.iter().map(|v| format!("'{v}'")).collect();
+            let quoted: Vec<String> = values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect();
             DdlType::exact(&format!("ENUM({})", quoted.join(", ")))
         }
         CanonicalType::Array { .. } => {

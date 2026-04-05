@@ -97,7 +97,12 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         }
         CanonicalType::Array { element } => {
             let inner = from_canonical(element);
-            DdlType::exact(&format!("{}[]", inner.sql_type))
+            let mut ddl = DdlType::exact(&format!("{}[]", inner.sql_type));
+            ddl.is_approximate = inner.is_approximate;
+            ddl.warning = inner
+                .warning
+                .map(|warning| format!("array element: {warning}"));
+            ddl
         }
         CanonicalType::Raw { type_name } => DdlType::exact(type_name),
     }

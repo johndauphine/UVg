@@ -11,7 +11,8 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
         "integer" | "int" => return CanonicalType::Integer,
         "smallint" => return CanonicalType::SmallInt,
         "bigint" => return CanonicalType::BigInt,
-        "real" | "float" | "double" => return CanonicalType::Float,
+        "real" | "float" => return CanonicalType::Float,
+        "double" => return CanonicalType::Double,
         "numeric" | "decimal" => {
             return CanonicalType::Decimal {
                 precision: col.numeric_precision,
@@ -42,7 +43,9 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
         CanonicalType::Text
     } else if upper.contains("BLOB") {
         CanonicalType::Bytes { length: None }
-    } else if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
+    } else if upper.contains("DOUB") {
+        CanonicalType::Double
+    } else if upper.contains("REAL") || upper.contains("FLOA") {
         CanonicalType::Float
     } else {
         CanonicalType::Decimal {
