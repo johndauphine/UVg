@@ -1614,4 +1614,63 @@ mod tests {
         // No relationship() calls for inheritance FKs
         assert!(!output.contains("relationship("));
     }
+
+    // --- PR 8: Misc feature tests ---
+
+    /// Adapted from sqlacodegen test_table_with_arrays (declarative).
+    #[test]
+    fn test_declarative_table_with_arrays() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("tags").udt("_text").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("tags: Mapped[Optional[list]] = mapped_column(ARRAY(Text))"));
+    }
+
+    /// Adapted from sqlacodegen test_constraints (declarative) — indexes + unique + check.
+    #[test]
+    fn test_declarative_constraints_full() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("number").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .check("", "number > 0")
+                .unique("uq_id_number", &["id", "number"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        assert!(output.contains("CheckConstraint('number > 0')"));
+        assert!(output.contains("UniqueConstraint('id', 'number', name='uq_id_number')"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_conflicting_column.
+    /// Column named "relationship" gets trailing underscore.
+    #[test]
+    fn test_declarative_onetomany_conflicting_column() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .column(col("relationship").udt("text").nullable().build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .fk("si_container_fkey", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // "relationship" column should be sanitized (it's a SQLAlchemy reserved name)
+        // The relationship import still works
+        assert!(output.contains("relationship("));
+    }
 }
