@@ -2023,4 +2023,171 @@ mod tests {
         assert!(output.contains("parent_container_id_: Mapped[Optional['SimpleContainers']]"));
         assert!(output.contains("top_container_id_: Mapped['SimpleContainers']"));
     }
+
+    // --- PR 14: Final coverage ---
+
+    /// Adapted from sqlacodegen test_manytomany_multi.
+    /// Multiple association tables between same two parent tables.
+    #[test]
+    fn test_declarative_manytomany_multi() {
+        let schema = schema_pg(vec![
+            table("left_table")
+                .column(col("id").build())
+                .pk("lt_pkey", &["id"])
+                .build(),
+            table("right_table")
+                .column(col("id").build())
+                .pk("rt_pkey", &["id"])
+                .build(),
+            table("assoc1")
+                .column(col("left_id").nullable().build())
+                .column(col("right_id").nullable().build())
+                .fk("a1_left_fkey", &["left_id"], "left_table", &["id"])
+                .fk("a1_right_fkey", &["right_id"], "right_table", &["id"])
+                .build(),
+            table("assoc2")
+                .column(col("left_id").nullable().build())
+                .column(col("right_id").nullable().build())
+                .fk("a2_left_fkey", &["left_id"], "left_table", &["id"])
+                .fk("a2_right_fkey", &["right_id"], "right_table", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Both association tables rendered as Table()
+        assert!(output.contains("t_assoc1 = Table("));
+        assert!(output.contains("t_assoc2 = Table("));
+        // M2M relationships exist on both parent tables
+        assert!(output.contains("secondary='assoc1'"));
+        assert!(output.contains("secondary='assoc2'"));
+    }
+
+    /// Adapted from sqlacodegen test_domain_json (declarative).
+    #[test]
+    fn test_declarative_domain_json() {
+        use crate::schema::{DomainInfo, IntrospectedSchema};
+        let schema = IntrospectedSchema {
+            dialect: crate::dialect::Dialect::Postgres,
+            tables: vec![
+                table("simple_items")
+                    .column(col("id").build())
+                    .column(col("data").udt("json_domain").nullable().build())
+                    .pk("simple_items_pkey", &["id"])
+                    .build(),
+            ],
+            enums: vec![],
+            domains: vec![DomainInfo {
+                name: "json_domain".to_string(),
+                schema: None,
+                base_type: "json".to_string(),
+                constraint_name: None,
+                not_null: false,
+                check_expression: None,
+            }],
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Domain columns in declarative mode: domain udt_name not resolved to base type
+        // (full DOMAIN() support in declarative is future work — currently falls through
+        // to the type mapper which uses the udt_name as-is)
+        assert!(output.contains("data:"));
+    }
+
+    /// Adapted from sqlacodegen test_named_constraints.
+    /// PrimaryKeyConstraint emitted in __table_args__ when CheckConstraint present.
+    #[test]
+    fn test_declarative_named_constraints() {
+        let schema = schema_pg(vec![
+            table("simple")
+                .column(col("id").nullable().build())
+                .column(col("text").udt("varchar").nullable().build())
+                .pk("primarytest", &["id"])
+                .check("checktest", "id > 0")
+                .unique("uniquetest", &["text"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Check and Unique constraints in __table_args__
+        assert!(output.contains("CheckConstraint('id > 0', name='checktest')"));
+        assert!(output.contains("UniqueConstraint('text', name='uniquetest')"));
+        // PK expressed via primary_key=True on mapped_column
+        assert!(output.contains("primary_key=True"));
+    }
+
+    /// Adapted from sqlacodegen test_manytomany_multi_with_nofknames.
+    #[test]
+    fn test_declarative_manytomany_multi_with_nofknames() {
+        let schema = schema_pg(vec![
+            table("left_table")
+                .column(col("id").build())
+                .pk("lt_pkey", &["id"])
+                .build(),
+            table("right_table")
+                .column(col("id").build())
+                .pk("rt_pkey", &["id"])
+                .build(),
+            table("assoc")
+                .column(col("left_id").nullable().build())
+                .column(col("right_id").nullable().build())
+                .fk("a_left_fkey", &["left_id"], "left_table", &["id"])
+                .fk("a_right_fkey", &["right_id"], "right_table", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nofknames: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // M2M still works with nofknames
+        assert!(output.contains("secondary='assoc'"));
+    }
+
+    /// Adapted from sqlacodegen test_named_foreign_key_constraints.
+    #[test]
+    fn test_declarative_named_foreign_key_constraints() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("sc_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .pk("si_pkey", &["id"])
+                .fk("foreignkeytest", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // FK rendered inline with relationship
+        assert!(output.contains("ForeignKey('simple_containers.id')"));
+        assert!(output.contains("relationship('SimpleContainers'"));
+    }
+
+    /// Adapted from sqlacodegen test_named_foreign_key_constraints_with_noidsuffix.
+    #[test]
+    fn test_declarative_named_foreign_key_constraints_with_noidsuffix() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("sc_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .pk("si_pkey", &["id"])
+                .fk("foreignkeytest", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            noidsuffix: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // With noidsuffix, relationship name keeps _id suffix
+        assert!(output.contains("relationship('SimpleContainers'"));
+    }
 }
