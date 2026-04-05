@@ -96,6 +96,21 @@ impl ConnectionConfig {
     }
 }
 
+/// Ensure a MySQL URL includes `charset=utf8mb4` so that `information_schema`
+/// returns proper VARCHAR columns instead of VARBINARY.
+fn ensure_mysql_charset(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+
+    let has_charset = parsed.query_pairs().any(|(key, _)| key == "charset");
+    if !has_charset {
+        parsed.query_pairs_mut().append_pair("charset", "utf8mb4");
+    }
+
+    parsed.into()
+}
+
 impl Cli {
     /// Parse the comma-delimited --tables flag into a Vec of table names.
     pub fn table_list(&self) -> Vec<String> {
@@ -165,19 +180,25 @@ impl Cli {
             .or_else(|| url.strip_prefix("mysql+aiomysql://"))
             .or_else(|| url.strip_prefix("mysql+asyncmy://"))
         {
-            return Ok(ConnectionConfig::Mysql(format!("mysql://{rest}")));
+            return Ok(ConnectionConfig::Mysql(ensure_mysql_charset(&format!(
+                "mysql://{rest}"
+            ))));
         }
         if let Some(rest) = url
             .strip_prefix("mariadb+pymysql://")
             .or_else(|| url.strip_prefix("mariadb+mysqldb://"))
         {
-            return Ok(ConnectionConfig::Mysql(format!("mysql://{rest}")));
+            return Ok(ConnectionConfig::Mysql(ensure_mysql_charset(&format!(
+                "mysql://{rest}"
+            ))));
         }
         if let Some(rest) = url.strip_prefix("mariadb://") {
-            return Ok(ConnectionConfig::Mysql(format!("mysql://{rest}")));
+            return Ok(ConnectionConfig::Mysql(ensure_mysql_charset(&format!(
+                "mysql://{rest}"
+            ))));
         }
         if url.starts_with("mysql://") {
-            return Ok(ConnectionConfig::Mysql(url.clone()));
+            return Ok(ConnectionConfig::Mysql(ensure_mysql_charset(url)));
         }
 
         // SQLite schemes
@@ -268,7 +289,7 @@ mod tests {
         let cli = cli_with_url("mysql://user:pass@localhost/mydb");
         let config = cli.parse_connection().unwrap();
         assert_eq!(config.dialect(), Dialect::Mysql);
-        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb"));
+        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb?charset=utf8mb4"));
     }
 
     #[test]
@@ -276,7 +297,7 @@ mod tests {
         let cli = cli_with_url("mysql+pymysql://user:pass@localhost/mydb");
         let config = cli.parse_connection().unwrap();
         assert_eq!(config.dialect(), Dialect::Mysql);
-        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb"));
+        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb?charset=utf8mb4"));
     }
 
     #[test]
@@ -284,7 +305,7 @@ mod tests {
         let cli = cli_with_url("mariadb://user:pass@localhost/mydb");
         let config = cli.parse_connection().unwrap();
         assert_eq!(config.dialect(), Dialect::Mysql);
-        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb"));
+        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb?charset=utf8mb4"));
     }
 
     #[test]
@@ -292,7 +313,14 @@ mod tests {
         let cli = cli_with_url("mariadb+pymysql://user:pass@localhost/mydb");
         let config = cli.parse_connection().unwrap();
         assert_eq!(config.dialect(), Dialect::Mysql);
-        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb"));
+        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb?charset=utf8mb4"));
+    }
+
+    #[test]
+    fn test_mysql_preserves_existing_charset() {
+        let cli = cli_with_url("mysql://user:pass@localhost/mydb?charset=latin1");
+        let config = cli.parse_connection().unwrap();
+        assert!(matches!(config, ConnectionConfig::Mysql(ref u) if u == "mysql://user:pass@localhost/mydb?charset=latin1"));
     }
 
     #[test]

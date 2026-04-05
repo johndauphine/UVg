@@ -11,18 +11,18 @@ pub async fn query_columns(
     let rows = sqlx::query_as::<_, ColumnRow>(
         r#"
         SELECT
-            c.COLUMN_NAME,
+            CAST(c.COLUMN_NAME AS CHAR) AS COLUMN_NAME,
             c.ORDINAL_POSITION,
             c.IS_NULLABLE = 'YES' AS is_nullable,
-            c.DATA_TYPE,
-            c.COLUMN_TYPE,
+            CAST(c.DATA_TYPE AS CHAR) AS DATA_TYPE,
+            CAST(c.COLUMN_TYPE AS CHAR) AS COLUMN_TYPE,
             c.CHARACTER_MAXIMUM_LENGTH,
             c.NUMERIC_PRECISION,
             c.NUMERIC_SCALE,
-            c.COLUMN_DEFAULT,
-            c.EXTRA,
-            c.COLUMN_COMMENT,
-            c.COLLATION_NAME
+            CAST(c.COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
+            CAST(c.EXTRA AS CHAR) AS EXTRA,
+            CAST(c.COLUMN_COMMENT AS CHAR) AS COLUMN_COMMENT,
+            CAST(c.COLLATION_NAME AS CHAR) AS COLLATION_NAME
         FROM information_schema.COLUMNS c
         WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ?
         ORDER BY c.ORDINAL_POSITION
