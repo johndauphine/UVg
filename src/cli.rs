@@ -99,14 +99,16 @@ impl ConnectionConfig {
 /// Ensure a MySQL URL includes `charset=utf8mb4` so that `information_schema`
 /// returns proper VARCHAR columns instead of VARBINARY.
 fn ensure_mysql_charset(url: &str) -> String {
-    if url.contains("charset=") {
+    let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();
+    };
+
+    let has_charset = parsed.query_pairs().any(|(key, _)| key == "charset");
+    if !has_charset {
+        parsed.query_pairs_mut().append_pair("charset", "utf8mb4");
     }
-    if url.contains('?') {
-        format!("{url}&charset=utf8mb4")
-    } else {
-        format!("{url}?charset=utf8mb4")
-    }
+
+    parsed.into_string()
 }
 
 impl Cli {
