@@ -288,11 +288,15 @@ fn generate_column_def(
 
     let is_pk = is_primary_key_column(&col.name, constraints);
 
+    // Compute canonical type once (used for type mapping and boolean default detection)
+    let canonical = crate::ddl_typemap::to_canonical(col, source_dialect);
+    let is_boolean = matches!(canonical, crate::ddl_typemap::CanonicalType::Boolean);
+
     // Type
     let type_str = if is_auto {
         format_autoincrement_type(col, source_dialect, target_dialect, is_pk)
     } else {
-        ddl_typemap::map_ddl_type(col, source_dialect, target_dialect).sql_type
+        ddl_typemap::from_canonical(&canonical, target_dialect).sql_type
     };
 
     let mut parts = vec![format!("    {qname} {type_str}")];
@@ -305,9 +309,6 @@ fn generate_column_def(
     // DEFAULT (skip for auto-increment columns)
     if !is_auto {
         if let Some(ref default) = col.column_default {
-            // Check if the target type is boolean to enable 0/1 → true/false translation
-            let canonical = crate::ddl_typemap::to_canonical(col, source_dialect);
-            let is_boolean = matches!(canonical, crate::ddl_typemap::CanonicalType::Boolean);
             let ddl_default =
                 format_ddl_default_typed(default, source_dialect, target_dialect, is_boolean);
             parts.push(format!("DEFAULT {ddl_default}"));
@@ -381,15 +382,8 @@ fn format_autoincrement_suffix(
 }
 
 /// Format a default value expression for the target dialect.
-/// `is_boolean` indicates the target column is a boolean type, enabling 0/1 → true/false translation.
-fn format_ddl_default(
-    default: &str,
-    source_dialect: Dialect,
-    target_dialect: Dialect,
-) -> String {
-    format_ddl_default_typed(default, source_dialect, target_dialect, false)
-}
-
+/// Format a default value expression for the target dialect.
+/// When `is_boolean` is true, translates 0/1 ↔ true/false across dialects.
 fn format_ddl_default_typed(
     default: &str,
     source_dialect: Dialect,
@@ -1138,5 +1132,56 @@ mod tests {
 
         let ddl = diff_schemas(&schema, &schema, &options);
         assert!(ddl.contains("No schema changes detected"));
+    }
+
+    #[test]
+    fn test_boolean_default_mssql_to_pg() {
+        // MSSQL BIT DEFAULT 1 → PG BOOLEAN DEFAULT true
+        assert_eq!(
+            format_ddl_default_typed("((1))", Dialect::Mssql, Dialect::Postgres, true),
+            "true"
+        );
+        assert_eq!(
+            format_ddl_default_typed("((0))", Dialect::Mssql, Dialect::Postgres, true),
+            "false"
+        );
+    }
+
+    #[test]
+    fn test_integer_default_not_converted_to_boolean() {
+        // INT DEFAULT 0 must stay 0, not become false
+        assert_eq!(
+            format_ddl_default_typed("((0))", Dialect::Mssql, Dialect::Postgres, false),
+            "0"
+        );
+        assert_eq!(
+            format_ddl_default_typed("((1))", Dialect::Mssql, Dialect::Postgres, false),
+            "1"
+        );
+    }
+
+    #[test]
+    fn test_boolean_default_pg_to_mysql() {
+        // PG BOOLEAN DEFAULT true → MySQL TINYINT(1) DEFAULT 1
+        assert_eq!(
+            format_ddl_default_typed("true", Dialect::Postgres, Dialect::Mysql, true),
+            "1"
+        );
+        assert_eq!(
+            format_ddl_default_typed("false", Dialect::Postgres, Dialect::Mysql, true),
+            "0"
+        );
+    }
+
+    #[test]
+    fn test_boolean_default_pg_to_mssql() {
+        assert_eq!(
+            format_ddl_default_typed("true", Dialect::Postgres, Dialect::Mssql, true),
+            "1"
+        );
+        assert_eq!(
+            format_ddl_default_typed("false", Dialect::Postgres, Dialect::Mssql, true),
+            "0"
+        );
     }
 }
