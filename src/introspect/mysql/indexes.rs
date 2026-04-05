@@ -12,7 +12,11 @@ pub async fn query_indexes(
 ) -> Result<Vec<IndexInfo>, UvgError> {
     let rows = sqlx::query_as::<_, IndexRow>(
         r#"
-        SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX
+        SELECT
+            CAST(INDEX_NAME AS CHAR) AS INDEX_NAME,
+            NON_UNIQUE,
+            CAST(COLUMN_NAME AS CHAR) AS COLUMN_NAME,
+            SEQ_IN_INDEX
         FROM information_schema.STATISTICS
         WHERE TABLE_SCHEMA = ?
           AND TABLE_NAME = ?

@@ -10,7 +10,11 @@ pub async fn query_tables(
 ) -> Result<Vec<TableInfo>, UvgError> {
     let rows = sqlx::query_as::<_, TableRow>(
         r#"
-        SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, TABLE_COMMENT
+        SELECT
+            CAST(TABLE_SCHEMA AS CHAR) AS TABLE_SCHEMA,
+            CAST(TABLE_NAME AS CHAR) AS TABLE_NAME,
+            CAST(TABLE_TYPE AS CHAR) AS TABLE_TYPE,
+            CAST(TABLE_COMMENT AS CHAR) AS TABLE_COMMENT
         FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = ?
           AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')

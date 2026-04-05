@@ -10,6 +10,7 @@ mod testutil;
 mod typemap;
 
 use std::fs;
+use std::str::FromStr;
 
 use anyhow::Result;
 use clap::Parser;
@@ -82,9 +83,11 @@ async fn main() -> Result<()> {
             .await?
         }
         ConnectionConfig::Mysql(url) => {
+            let opts = sqlx::mysql::MySqlConnectOptions::from_str(&url)?
+                .charset("utf8mb4");
             let pool = sqlx::mysql::MySqlPoolOptions::new()
                 .max_connections(1)
-                .connect(&url)
+                .connect_with(opts)
                 .await?;
             tracing::debug!("Introspecting schema...");
             let s = introspect::mysql::introspect(

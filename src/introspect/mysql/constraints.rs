@@ -15,7 +15,11 @@ pub async fn query_constraints(
     // Primary keys and unique constraints
     let pk_uq_rows = sqlx::query_as::<_, PkUqRow>(
         r#"
-        SELECT tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, kcu.COLUMN_NAME, kcu.ORDINAL_POSITION
+        SELECT
+            CAST(tc.CONSTRAINT_NAME AS CHAR) AS CONSTRAINT_NAME,
+            CAST(tc.CONSTRAINT_TYPE AS CHAR) AS CONSTRAINT_TYPE,
+            CAST(kcu.COLUMN_NAME AS CHAR) AS COLUMN_NAME,
+            kcu.ORDINAL_POSITION
         FROM information_schema.TABLE_CONSTRAINTS tc
         JOIN information_schema.KEY_COLUMN_USAGE kcu
             ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
@@ -59,13 +63,13 @@ pub async fn query_constraints(
     let fk_rows = sqlx::query_as::<_, FkRow>(
         r#"
         SELECT
-            kcu.CONSTRAINT_NAME,
-            kcu.COLUMN_NAME,
-            kcu.REFERENCED_TABLE_SCHEMA,
-            kcu.REFERENCED_TABLE_NAME,
-            kcu.REFERENCED_COLUMN_NAME,
-            rc.UPDATE_RULE,
-            rc.DELETE_RULE
+            CAST(kcu.CONSTRAINT_NAME AS CHAR) AS CONSTRAINT_NAME,
+            CAST(kcu.COLUMN_NAME AS CHAR) AS COLUMN_NAME,
+            CAST(kcu.REFERENCED_TABLE_SCHEMA AS CHAR) AS REFERENCED_TABLE_SCHEMA,
+            CAST(kcu.REFERENCED_TABLE_NAME AS CHAR) AS REFERENCED_TABLE_NAME,
+            CAST(kcu.REFERENCED_COLUMN_NAME AS CHAR) AS REFERENCED_COLUMN_NAME,
+            CAST(rc.UPDATE_RULE AS CHAR) AS UPDATE_RULE,
+            CAST(rc.DELETE_RULE AS CHAR) AS DELETE_RULE
         FROM information_schema.KEY_COLUMN_USAGE kcu
         JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
             ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
@@ -119,7 +123,9 @@ pub async fn query_constraints(
     // Check constraints (MySQL 8.0+; older versions lack CHECK_CONSTRAINTS table)
     let check_rows = match sqlx::query_as::<_, CheckRow>(
         r#"
-        SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE
+        SELECT
+            CAST(cc.CONSTRAINT_NAME AS CHAR) AS CONSTRAINT_NAME,
+            CAST(cc.CHECK_CLAUSE AS CHAR) AS CHECK_CLAUSE
         FROM information_schema.CHECK_CONSTRAINTS cc
         JOIN information_schema.TABLE_CONSTRAINTS tc
             ON tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
