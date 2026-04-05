@@ -16,7 +16,7 @@ use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
 use crate::naming::{column_to_attr_name, table_to_class_name, table_to_variable_name};
 use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
-use crate::typemap::map_column_type;
+use crate::typemap::{map_column_type, map_column_type_dialect};
 
 pub struct DeclarativeGenerator;
 
@@ -283,7 +283,11 @@ fn generate_class(
             let sa = format!("Enum({})", enum_parts.join(", "));
             (sa, cls)
         } else {
-            let mapped = map_column_type(col, dialect);
+            let mapped = if options.keep_dialect_types {
+                map_column_type_dialect(col, dialect)
+            } else {
+                map_column_type(col, dialect)
+            };
             imports.add(&mapped.import_module, &mapped.import_name);
             if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
                 imports.add(elem_mod, elem_name);
@@ -692,7 +696,11 @@ fn generate_association_table(
                 body_items.push(format!("Column('{}', ForeignKey('{}'))", col_info.name, target));
             }
         } else {
-            let mapped = map_column_type(col_info, dialect);
+            let mapped = if options.keep_dialect_types {
+                map_column_type_dialect(col_info, dialect)
+            } else {
+                map_column_type(col_info, dialect)
+            };
             imports.add(&mapped.import_module, &mapped.import_name);
             body_items.push(format!("Column('{}', {})", col_info.name, mapped.sa_type));
         }
@@ -733,7 +741,11 @@ fn generate_table_fallback(
     let mut body_items: Vec<String> = Vec::new();
 
     for col in &table.columns {
-        let mapped = map_column_type(col, dialect);
+        let mapped = if options.keep_dialect_types {
+            map_column_type_dialect(col, dialect)
+        } else {
+            map_column_type(col, dialect)
+        };
         imports.add(&mapped.import_module, &mapped.import_name);
         if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
             imports.add(elem_mod, elem_name);
@@ -2658,5 +2670,29 @@ mod tests {
         assert!(output.contains("simple_items: Mapped[list['SimpleItems']]"));
         // TODO: With use_inflect, parent side would use singularized/pluralized names
         // e.g. "simple_item: Mapped[list['SimpleItems']]" → pluralized collection
+    }
+
+    /// Test keep_dialect_types in declarative mode for PostgreSQL.
+    #[test]
+    fn test_declarative_keep_dialect_types_pg() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").udt("int8").build())
+                .column(col("name").udt("varchar").max_length(100).nullable().build())
+                .column(col("score").udt("float8").nullable().build())
+                .pk("si_pkey", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            keep_dialect_types: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // PG dialect types preserved in declarative
+        assert!(output.contains("BIGINT"));
+        assert!(output.contains("VARCHAR(100)"));
+        assert!(output.contains("DOUBLE_PRECISION"));
+        assert!(output.contains("from sqlalchemy.dialects.postgresql import"));
     }
 }

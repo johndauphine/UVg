@@ -27,6 +27,14 @@ pub fn map_column_type(col: &ColumnInfo, dialect: Dialect) -> MappedType {
     }
 }
 
+/// Map a column keeping dialect-specific types (for keep_dialect_types option).
+pub fn map_column_type_dialect(col: &ColumnInfo, dialect: Dialect) -> MappedType {
+    match dialect {
+        Dialect::Postgres => pg::map_column_type_dialect(col),
+        Dialect::Mssql => mssql::map_column_type_dialect(col),
+    }
+}
+
 /// Helper to create a simple MappedType with no parameters or element imports.
 pub fn simple(sa_type: &str, python_type: &str, import_module: &str) -> MappedType {
     MappedType {

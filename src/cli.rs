@@ -27,7 +27,7 @@ pub struct Cli {
     #[arg(long)]
     pub noviews: bool,
 
-    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments, nobidi, nofknames, noidsuffix, nosyntheticenums, nonativeenums
+    /// Generator options (comma-delimited): noindexes, noconstraints, nocomments, nobidi, nofknames, noidsuffix, nosyntheticenums, nonativeenums, keep_dialect_types
     #[arg(long)]
     pub options: Option<String>,
 
@@ -50,6 +50,7 @@ pub struct GeneratorOptions {
     pub noidsuffix: bool,
     pub nosyntheticenums: bool,
     pub nonativeenums: bool,
+    pub keep_dialect_types: bool,
 }
 
 /// Parsed connection configuration.
@@ -104,6 +105,7 @@ impl Cli {
                     "noidsuffix" => opts.noidsuffix = true,
                     "nosyntheticenums" => opts.nosyntheticenums = true,
                     "nonativeenums" => opts.nonativeenums = true,
+                    "keep_dialect_types" => opts.keep_dialect_types = true,
                     _ => tracing::warn!("Unknown generator option: {}", opt),
                 }
             }

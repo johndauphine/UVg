@@ -12,7 +12,7 @@ use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
 use crate::naming::table_to_variable_name;
 use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
-use crate::typemap::map_column_type;
+use crate::typemap::{map_column_type, map_column_type_dialect};
 
 pub struct TablesGenerator;
 
@@ -208,7 +208,11 @@ fn generate_table(
                     udt_name: di.base_type.clone(),
                     ..col.clone()
                 };
-                let base_mapped = map_column_type(&base_col, dialect);
+                let base_mapped = if options.keep_dialect_types {
+                    map_column_type_dialect(&base_col, dialect)
+                } else {
+                    map_column_type(&base_col, dialect)
+                };
                 imports.add(&base_mapped.import_module, &base_mapped.import_name);
 
                 let mut domain_args = vec![
@@ -225,7 +229,11 @@ fn generate_table(
                 }
                 col_args.push(format!("DOMAIN({})", domain_args.join(", ")));
             } else {
-                let mapped = map_column_type(col, dialect);
+                let mapped = if options.keep_dialect_types {
+                    map_column_type_dialect(col, dialect)
+                } else {
+                    map_column_type(col, dialect)
+                };
                 imports.add(&mapped.import_module, &mapped.import_name);
                 if let Some((ref elem_mod, ref elem_name)) = mapped.element_import {
                     imports.add(elem_mod, elem_name);
@@ -1226,5 +1234,75 @@ mod tests {
         assert!(output.contains("'test_seq'"));
         assert!(output.contains("schema='testschema'"));
         assert!(!output.contains("'testschema.test_seq'"));
+    }
+
+    // --- keep_dialect_types tests ---
+
+    /// Test keep_dialect_types for PostgreSQL tables generator.
+    /// Types should stay as PG-specific instead of adapting to generic.
+    #[test]
+    fn test_tables_keep_dialect_types_pg() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").udt("int8").nullable().build())
+                .column(col("name").udt("varchar").max_length(100).nullable().build())
+                .column(col("score").udt("float8").nullable().build())
+                .column(col("data").udt("jsonb").nullable().build())
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            keep_dialect_types: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &opts);
+        // PG dialect types preserved
+        assert!(output.contains("BIGINT"));
+        assert!(output.contains("VARCHAR(100)"));
+        assert!(output.contains("DOUBLE_PRECISION"));
+        assert!(output.contains("JSONB"));
+        assert!(output.contains("from sqlalchemy.dialects.postgresql import"));
+    }
+
+    /// Test default (no keep_dialect_types) — types adapted to generic.
+    #[test]
+    fn test_tables_no_keep_dialect_types_pg() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").udt("int8").nullable().build())
+                .column(col("score").udt("float8").nullable().build())
+                .build(),
+        ]);
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Generic types
+        assert!(output.contains("BigInteger"));
+        assert!(output.contains("Double"));
+        assert!(!output.contains("BIGINT"));
+        assert!(!output.contains("DOUBLE_PRECISION"));
+    }
+
+    /// Test keep_dialect_types for MSSQL tables generator.
+    #[test]
+    fn test_tables_keep_dialect_types_mssql() {
+        let schema = schema_mssql(vec![
+            table("simple_items")
+                .schema("dbo")
+                .column(col("id").udt("int").nullable().build())
+                .column(col("small").udt("smallint").nullable().build())
+                .column(col("guid").udt("uniqueidentifier").nullable().build())
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            keep_dialect_types: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = TablesGenerator;
+        let output = gen.generate(&schema, &opts);
+        // MSSQL dialect types preserved
+        assert!(output.contains("INTEGER"));
+        assert!(output.contains("SMALLINT"));
+        assert!(output.contains("UNIQUEIDENTIFIER"));
+        assert!(output.contains("from sqlalchemy.dialects.mssql import"));
     }
 }
