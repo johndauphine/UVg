@@ -34,11 +34,17 @@ pub async fn query_indexes(
         let entry = index_map
             .entry(row.index_name)
             .or_insert_with(|| (!row.non_unique, Vec::new()));
-        entry.1.push(row.column_name);
+        // COLUMN_NAME is NULL for functional/expression indexes (MySQL 8+);
+        // skip those columns rather than crashing.
+        if let Some(col) = row.column_name {
+            entry.1.push(col);
+        }
     }
 
+    // Filter out indexes that ended up with no columns (purely expression-based)
     let indexes = index_map
         .into_iter()
+        .filter(|(_, (_, cols))| !cols.is_empty())
         .map(|(name, (is_unique, columns))| IndexInfo {
             name,
             is_unique,
@@ -57,7 +63,7 @@ struct IndexRow {
     #[sqlx(rename = "NON_UNIQUE")]
     non_unique: bool,
     #[sqlx(rename = "COLUMN_NAME")]
-    column_name: String,
+    column_name: Option<String>,
     #[sqlx(rename = "SEQ_IN_INDEX")]
     _seq_in_index: u32,
 }

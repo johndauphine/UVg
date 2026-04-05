@@ -26,7 +26,12 @@ pub async fn query_indexes(
         .fetch_all(pool)
         .await?;
 
-        let columns: Vec<String> = col_rows.into_iter().map(|r| r.name).collect();
+        // name is NULL for expression-based index terms; skip those
+        let columns: Vec<String> = col_rows.into_iter().filter_map(|r| r.name).collect();
+        if columns.is_empty() {
+            // Purely expression-based index — skip entirely
+            continue;
+        }
         indexes.push(IndexInfo {
             name: idx.name,
             is_unique: idx.unique,
@@ -48,5 +53,5 @@ struct IndexListRow {
 
 #[derive(sqlx::FromRow)]
 struct IndexInfoRow {
-    name: String,
+    name: Option<String>,
 }
