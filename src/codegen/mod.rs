@@ -146,6 +146,16 @@ pub fn format_python_string_literal(s: &str) -> String {
     }
 }
 
+/// Format index kwargs as a string of ", key='value'" pairs.
+/// Empty values are skipped.
+pub fn format_index_kwargs(kwargs: &std::collections::BTreeMap<String, String>) -> String {
+    kwargs
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!(", {k}={}", format_python_string_literal(v)))
+        .collect()
+}
+
 /// Try to parse an IN-list from a check constraint expression.
 /// Returns (column_name, values) if the expression matches `[table.]column IN ('a', 'b', 'c')`.
 pub fn parse_check_enum(expression: &str) -> Option<(String, Vec<String>)> {

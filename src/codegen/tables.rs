@@ -2,10 +2,11 @@ use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
-    format_python_string_literal, format_server_default, generate_enum_class,
-    is_primary_key_column, is_serial_default, is_standard_sequence_name,
-    is_unique_constraint_index, parse_check_boolean, parse_check_enum, parse_sequence_name,
-    quote_constraint_columns, topo_sort_tables, Generator,
+    format_index_kwargs, format_python_string_literal, format_server_default,
+    generate_enum_class, is_primary_key_column, is_serial_default,
+    is_standard_sequence_name, is_unique_constraint_index, parse_check_boolean,
+    parse_check_enum, parse_sequence_name, quote_constraint_columns, topo_sort_tables,
+    Generator,
 };
 use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
@@ -390,11 +391,13 @@ fn generate_table(
             imports.add("sqlalchemy", "Index");
             let cols = quote_constraint_columns(&index.columns);
             let unique_str = if index.is_unique { ", unique=True" } else { "" };
+            let kwargs_str = format_index_kwargs(&index.kwargs);
             body_items.push(format!(
-                "Index('{}', {}{})",
+                "Index('{}', {}{}{})",
                 index.name,
                 cols.join(", "),
-                unique_str
+                unique_str,
+                kwargs_str
             ));
         }
     }

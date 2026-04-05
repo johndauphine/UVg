@@ -57,6 +57,7 @@ pub async fn query_indexes(
             name,
             is_unique,
             columns,
+            kwargs: std::collections::BTreeMap::new(),
         })
         .collect();
 

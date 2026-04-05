@@ -220,6 +220,23 @@ impl TableInfoBuilder {
             name: name.to_string(),
             is_unique: unique,
             columns: cols.iter().map(|s| s.to_string()).collect(),
+            kwargs: std::collections::BTreeMap::new(),
+        });
+        self
+    }
+
+    pub fn index_with_kwargs(
+        mut self,
+        name: &str,
+        cols: &[&str],
+        unique: bool,
+        kwargs: &[(&str, &str)],
+    ) -> Self {
+        self.inner.indexes.push(IndexInfo {
+            name: name.to_string(),
+            is_unique: unique,
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            kwargs: kwargs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         });
         self
     }

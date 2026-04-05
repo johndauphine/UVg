@@ -119,4 +119,6 @@ pub struct IndexInfo {
     pub name: String,
     pub is_unique: bool,
     pub columns: Vec<String>,
+    /// Dialect-specific index kwargs (e.g. postgresql_using, mysql_length).
+    pub kwargs: std::collections::BTreeMap<String, String>,
 }
