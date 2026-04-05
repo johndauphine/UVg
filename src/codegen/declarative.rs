@@ -420,7 +420,7 @@ fn generate_class(
     }
 
     // Relationships (suppressed when noconstraints)
-    let (parent_rels, mut child_rels, mut m2m_rels) = if !options.noconstraints {
+    let (mut parent_rels, mut child_rels, mut m2m_rels) = if !options.noconstraints {
         let parent = if !options.nobidi {
             generate_parent_relationships(table, schema)
         } else {
@@ -440,6 +440,41 @@ fn generate_class(
         }
         for rel in &mut m2m_rels {
             rel.back_populates.clear();
+        }
+    }
+
+    // Resolve relationship name conflicts with column attribute names
+    let col_attr_names: std::collections::HashSet<&str> = attr_names.iter().map(|s| s.as_str()).collect();
+    let mut rel_attr_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut renames: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for rel in parent_rels
+        .iter_mut()
+        .chain(child_rels.iter_mut())
+        .chain(m2m_rels.iter_mut())
+    {
+        let original = rel.attr_name.clone();
+        while col_attr_names.contains(rel.attr_name.as_str())
+            || rel_attr_names.contains(&rel.attr_name)
+        {
+            rel.attr_name.push('_');
+        }
+        if rel.attr_name != original {
+            renames.insert(original, rel.attr_name.clone());
+        }
+        rel_attr_names.insert(rel.attr_name.clone());
+    }
+
+    // Update back_populates references to match renamed attributes
+    if !renames.is_empty() {
+        for rel in parent_rels
+            .iter_mut()
+            .chain(child_rels.iter_mut())
+            .chain(m2m_rels.iter_mut())
+        {
+            if let Some(new_name) = renames.get(&rel.back_populates) {
+                rel.back_populates = new_name.clone();
+            }
         }
     }
 
@@ -501,11 +536,16 @@ fn build_table_args(
                         .map(|c| format!("'{}.{c}'", fk.ref_table))
                         .collect();
                     let fk_opts = format_fk_options(fk);
+                    let name_part = if !options.nofknames {
+                        format!(", name='{}'", constraint.name)
+                    } else {
+                        String::new()
+                    };
                     positional_args.push(format!(
-                        "ForeignKeyConstraint([{}], [{}], name='{}'{})",
+                        "ForeignKeyConstraint([{}], [{}]{}{})",
                         local_cols.join(", "),
                         ref_cols.join(", "),
-                        constraint.name,
+                        name_part,
                         fk_opts
                     ));
                 }
@@ -755,11 +795,16 @@ fn generate_table_fallback(
                         .map(|c| format!("'{}.{c}'", fk.ref_table))
                         .collect();
                     let fk_opts = format_fk_options(fk);
+                    let name_part = if !options.nofknames {
+                        format!(", name='{}'", constraint.name)
+                    } else {
+                        String::new()
+                    };
                     body_items.push(format!(
-                        "ForeignKeyConstraint([{}], [{}], name='{}'{})",
+                        "ForeignKeyConstraint([{}], [{}]{}{})",
                         local_cols.join(", "),
                         ref_cols.join(", "),
-                        constraint.name,
+                        name_part,
                         fk_opts
                     ));
                 }
@@ -1867,5 +1912,58 @@ mod tests {
         // Composite M2M: assoc is NOT an association table (requires single-col FKs)
         // So it gets Table() fallback (no PK)
         assert!(output.contains("t_assoc = Table("));
+    }
+
+    // --- PR 10: Relationship completion tests ---
+
+    /// Adapted from sqlacodegen test_onetomany_conflicting_relationship.
+    /// Relationship name collides with column name — gets underscore suffix.
+    #[test]
+    fn test_declarative_onetomany_conflicting_relationship() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("sc_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id").nullable().build())
+                .column(col("container").udt("varchar").nullable().build())
+                .pk("si_pkey", &["id"])
+                .fk("si_fkey", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // "container" column exists, so relationship "container" becomes "container_"
+        assert!(output.contains("container: Mapped[Optional[str]] = mapped_column(String)"));
+        assert!(output.contains("container_: Mapped[Optional['SimpleContainers']] = relationship("));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_multiref_with_nofknames.
+    #[test]
+    fn test_declarative_onetomany_multiref_with_nofknames() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("sc_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container_id1").nullable().build())
+                .column(col("container_id2").nullable().build())
+                .pk("si_pkey", &["id"])
+                .fk_full("si_c1_fkey", &["container_id1", "container_id2"], "public", "simple_containers", &["id", "id"], "NO ACTION", "NO ACTION")
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nofknames: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // ForeignKeyConstraint without name= kwarg
+        assert!(output.contains("ForeignKeyConstraint("));
+        assert!(!output.contains("name='si_c1_fkey'"));
     }
 }
