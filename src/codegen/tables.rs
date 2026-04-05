@@ -39,19 +39,13 @@ impl Generator for TablesGenerator {
                             use heck::ToUpperCamelCase;
                             let enum_name =
                                 format!("{}_{}", table.name, col_name).to_upper_camel_case();
-                            // Check if enum with same values already exists
-                            let existing = all_enums.iter().find(|e| e.values == values);
-                            let class_name = if let Some(existing) = existing {
-                                enum_class_name(&existing.name)
-                            } else {
-                                let ei = EnumInfo {
-                                    name: enum_name.clone(),
-                                    schema: None,
-                                    values,
-                                };
-                                all_enums.push(ei);
-                                enum_name
+                            let ei = EnumInfo {
+                                name: enum_name.clone(),
+                                schema: None,
+                                values,
                             };
+                            all_enums.push(ei);
+                            let class_name = enum_name;
                             synthetic_enum_cols.insert(
                                 (table.name.clone(), col_name),
                                 class_name,
@@ -63,22 +57,19 @@ impl Generator for TablesGenerator {
         }
 
         // Track which enums are actually used
-        let mut used_enum_names: Vec<String> = Vec::new();
+        let mut used_enum_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for table in &sorted_tables {
             // Track named enum usage
-            for col in &table.columns {
-                if find_enum_for_column(&col.udt_name, &all_enums).is_some() {
-                    let name = col.udt_name.clone();
-                    if !used_enum_names.contains(&name) {
-                        used_enum_names.push(name);
-                    }
+            for col_info in &table.columns {
+                if find_enum_for_column(&col_info.udt_name, &all_enums).is_some() {
+                    used_enum_names.insert(col_info.udt_name.clone());
                 }
-            }
-            // Track synthetic enum usage
-            for (key, class_name) in &synthetic_enum_cols {
-                if key.0 == table.name && !used_enum_names.contains(class_name) {
-                    used_enum_names.push(class_name.clone());
+                // Track synthetic enum usage via direct lookup
+                let key = (table.name.clone(), col_info.name.clone());
+                if let Some(class_name) = synthetic_enum_cols.get(&key) {
+                    used_enum_names.insert(class_name.clone());
                 }
             }
 
@@ -154,6 +145,8 @@ fn generate_table(
             col_args.push(format!(
                 "Enum({class_name}, values_callable=lambda cls: [member.value for member in cls])"
             ));
+            // Note: sqlacodegen doesn't emit native_enum/create_constraint for synthetic enums.
+            // If needed for DDL correctness, add: native_enum=False, create_constraint=False
         }
         // Check if column type is a named enum
         else if let Some(ei) = find_enum_for_column(&col.udt_name, enums) {
