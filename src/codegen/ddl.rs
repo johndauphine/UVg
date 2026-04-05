@@ -382,7 +382,6 @@ fn format_autoincrement_suffix(
 }
 
 /// Format a default value expression for the target dialect.
-/// Format a default value expression for the target dialect.
 /// When `is_boolean` is true, translates 0/1 ↔ true/false across dialects.
 pub(super) fn format_ddl_default_typed(
     default: &str,
