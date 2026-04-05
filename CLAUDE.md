@@ -37,7 +37,8 @@ The application follows a pipeline: **CLI parsing -> Connection -> Introspection
 
 ### Key modules (`src/`)
 
-- **`cli.rs`** -- Clap-based CLI parsing. Produces `ConnectionConfig` (Postgres/MySQL URL string, SQLite path, or MSSQL connection fields) and `GeneratorOptions` (`noindexes`, `noconstraints`, `nocomments`).
+- **`cli.rs`** -- Clap-based CLI parsing. Produces `ConnectionConfig` (Postgres/MySQL URL string, SQLite path, or MSSQL connection fields) and `GeneratorOptions` (`noindexes`, `noconstraints`, `nocomments`). The `--interactive` (`-i`) flag triggers the TUI mode.
+- **`db.rs`** -- Shared database operations: `introspect_with_config()` connects to any dialect and returns `IntrospectedSchema`; `execute_ddl()` splits DDL into statements and executes them one-by-one against a target database.
 - **`dialect.rs`** -- `Dialect` enum (Postgres, Mssql, Mysql, Sqlite) with `default_schema()` returning `"public"`, `"dbo"`, `""` (MySQL uses database name), or `"main"`.
 - **`schema.rs`** -- Data structures representing introspected schema: `IntrospectedSchema`, `TableInfo`, `ColumnInfo`, `ConstraintInfo` (PrimaryKey/ForeignKey/Unique/Check), `IndexInfo`.
 - **`introspect/pg/`** -- PostgreSQL introspection via sqlx. Queries `information_schema` and `pg_catalog` across submodules: `tables.rs`, `columns.rs`, `constraints.rs`, `indexes.rs`.
@@ -56,6 +57,7 @@ The application follows a pipeline: **CLI parsing -> Connection -> Introspection
 - **`ddl_typemap/`** -- Cross-dialect type translation via `CanonicalType` intermediate representation. Maps source DB types to target DDL types (e.g., PG `jsonb` → MySQL `JSON`, PG `uuid` → MSSQL `UNIQUEIDENTIFIER`).
 - **`naming.rs`** -- Table/column name transformations: `table_to_class_name()` (UpperCamelCase via `heck`), `table_to_variable_name()` (sanitized `t_` prefix).
 - **`error.rs`** -- `UvgError` enum using `thiserror`.
+- **`tui/mod.rs`** -- Interactive terminal UI (ratatui + crossterm). State machine with screens: URL input, DDL diff view (scrollable), apply confirmation, and result display. Reuses `db.rs` for introspection and DDL execution.
 
 ### Output fidelity
 

@@ -8,6 +8,14 @@ CLI parsing -> Connection -> Introspection -> Code Generation -> Output
 
 Each stage is a pure transformation. The introspection stage queries the database and produces an `IntrospectedSchema` struct. The code generation stage consumes that struct and produces a Python source string. There are no callbacks, no shared mutable state between stages, and no intermediate files.
 
+The interactive TUI (`--interactive` / `-i`) adds an optional apply stage to the DDL pipeline:
+
+```
+URL Input -> Introspection (source + target) -> DDL Diff -> View -> Apply (optional)
+```
+
+The apply stage splits DDL output on `;`, strips leading comments from each statement, and executes them sequentially against the target database via `db::execute_ddl()`.
+
 ## Data Model
 
 All introspected metadata flows through these structs defined in `src/schema.rs`:

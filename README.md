@@ -51,6 +51,10 @@ uvg postgresql://source/db --generator ddl --target-dialect mysql --split-tables
 
 # Diff source against target, emit ALTER statements
 uvg postgresql://source/db mysql://target/db --generator ddl
+
+# Interactive TUI: enter URLs, view diff, optionally apply to target
+uvg -i
+uvg -i postgresql://source/db postgresql://target/db
 ```
 
 ### Options
@@ -65,6 +69,7 @@ uvg postgresql://source/db mysql://target/db --generator ddl
 | `--noviews` | Skip views |
 | `--options <LIST>` | `noindexes`, `noconstraints`, `nocomments`, `nobidi`, `nofknames`, `noidsuffix`, `nosyntheticenums`, `nonativeenums`, `keep_dialect_types` |
 | `--outfile <PATH>` | Output file or directory (default: stdout) |
+| `--interactive`, `-i` | Launch interactive TUI for DDL diff and apply |
 | `--trust-cert` | Trust the server certificate (MSSQL only) |
 
 ## Output Examples
