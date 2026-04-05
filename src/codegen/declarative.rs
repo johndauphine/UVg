@@ -424,12 +424,12 @@ fn generate_class(
     // Relationships (suppressed when noconstraints)
     let (mut parent_rels, mut child_rels, mut m2m_rels) = if !options.noconstraints {
         let parent = if !options.nobidi {
-            generate_parent_relationships(table, schema)
+            generate_parent_relationships(table, schema, options.noidsuffix)
         } else {
             vec![]
         };
-        let child = generate_child_relationships(table, schema);
-        let m2m = generate_m2m_relationships(table, schema, dialect.default_schema());
+        let child = generate_child_relationships(table, schema, options.noidsuffix);
+        let m2m = generate_m2m_relationships(table, schema, dialect.default_schema(), options.noidsuffix);
         (parent, child, m2m)
     } else {
         (vec![], vec![], vec![])
@@ -1991,5 +1991,36 @@ mod tests {
         assert!(!output.contains("import enum"));
         // Column uses regular type
         assert!(output.contains("mapped_column(String)"));
+    }
+
+    // --- PR 13: noidsuffix and misc tests ---
+
+    /// Adapted from sqlacodegen test_onetomany_multiref_no_id_suffix.
+    #[test]
+    fn test_declarative_onetomany_multiref_no_id_suffix() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("sc_pkey", &["id"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("parent_container_id").nullable().build())
+                .column(col("top_container_id").build())
+                .pk("si_pkey", &["id"])
+                .fk("si_parent_fkey", &["parent_container_id"], "simple_containers", &["id"])
+                .fk("si_top_fkey", &["top_container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            noidsuffix: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // With noidsuffix, relationship names keep the full FK column name.
+        // Since they collide with column names, they get underscore suffix.
+        assert!(output.contains("parent_container_id_: Mapped[Optional['SimpleContainers']]"));
+        assert!(output.contains("top_container_id_: Mapped['SimpleContainers']"));
     }
 }

@@ -51,7 +51,11 @@ pub fn has_unique_constraint(col_name: &str, constraints: &[ConstraintInfo]) -> 
 
 /// Derive the relationship attribute name on the child side.
 /// Strips `_id` suffix from FK column name, also handles uppercase `ID` suffix.
-fn fk_col_to_relationship_name(col_name: &str) -> String {
+/// When `noidsuffix` is true, keeps the full column name.
+fn fk_col_to_relationship_name(col_name: &str, noidsuffix: bool) -> String {
+    if noidsuffix {
+        return col_name.to_string();
+    }
     col_name
         .strip_suffix("_id")
         .or_else(|| col_name.strip_suffix("ID"))
@@ -77,6 +81,7 @@ fn count_fks_to_table(table: &TableInfo, target_table: &str) -> usize {
 pub fn generate_child_relationships(
     table: &TableInfo,
     _schema: &IntrospectedSchema,
+    noidsuffix: bool,
 ) -> Vec<RelationshipInfo> {
     let mut rels = Vec::new();
 
@@ -116,7 +121,7 @@ pub fn generate_child_relationships(
 
         if is_single_column_fk(constraint) {
             let col_name = &constraint.columns[0];
-            let rel_name = fk_col_to_relationship_name(col_name);
+            let rel_name = fk_col_to_relationship_name(col_name, noidsuffix);
 
             let is_nullable = table
                 .columns
@@ -215,6 +220,7 @@ pub fn generate_child_relationships(
 pub fn generate_parent_relationships(
     parent_table: &TableInfo,
     schema: &IntrospectedSchema,
+    noidsuffix: bool,
 ) -> Vec<RelationshipInfo> {
     let mut rels = Vec::new();
 
@@ -250,7 +256,7 @@ pub fn generate_parent_relationships(
         for constraint in &fk_constraints {
             if is_single_column_fk(constraint) {
                 let col_name = &constraint.columns[0];
-                let child_rel_name = fk_col_to_relationship_name(col_name);
+                let child_rel_name = fk_col_to_relationship_name(col_name, noidsuffix);
                 let is_onetoone =
                     has_unique_constraint(col_name, &child_table.constraints);
 
@@ -370,6 +376,7 @@ pub fn generate_m2m_relationships(
     table: &TableInfo,
     schema: &IntrospectedSchema,
     default_schema: &str,
+    noidsuffix: bool,
 ) -> Vec<RelationshipInfo> {
     let mut rels = Vec::new();
 
@@ -399,10 +406,10 @@ pub fn generate_m2m_relationships(
         };
 
         // Derive relationship name from the FK column targeting the other table
-        let rel_name = derive_m2m_rel_name(assoc_table, other_table);
+        let rel_name = derive_m2m_rel_name(assoc_table, other_table, noidsuffix);
 
         // back_populates: the other table's relationship name for this table
-        let back_pop = derive_m2m_rel_name(assoc_table, &table.name);
+        let back_pop = derive_m2m_rel_name(assoc_table, &table.name, noidsuffix);
 
         rels.push(RelationshipInfo {
             attr_name: rel_name,
@@ -423,13 +430,13 @@ pub fn generate_m2m_relationships(
 /// Derive the M2M relationship name from the FK column targeting the OTHER table.
 /// E.g., for LeftTable looking through assoc with left_id/right_id FK columns,
 /// the relationship name is "right" (from right_id pointing to RightTable).
-fn derive_m2m_rel_name(assoc_table: &TableInfo, other_table: &str) -> String {
+fn derive_m2m_rel_name(assoc_table: &TableInfo, other_table: &str, noidsuffix: bool) -> String {
     // Find the FK column that points TO other_table
     for constraint in &assoc_table.constraints {
         if constraint.constraint_type == ConstraintType::ForeignKey {
             if let Some(ref fk) = constraint.foreign_key {
                 if fk.ref_table == other_table && constraint.columns.len() == 1 {
-                    return fk_col_to_relationship_name(&constraint.columns[0]);
+                    return fk_col_to_relationship_name(&constraint.columns[0], noidsuffix);
                 }
             }
         }
