@@ -271,10 +271,8 @@ fn generate_table(
                     let bare_name = full_seq_name.rsplit('.').next().unwrap_or(&full_seq_name);
                     if !is_standard_sequence_name(bare_name, &table.name, &col.name) {
                         imports.add("sqlalchemy", "Sequence");
-                        // Split schema.name if present
-                        if let Some(dot_pos) = full_seq_name.find('.') {
-                            let seq_schema = &full_seq_name[..dot_pos];
-                            let seq_name = &full_seq_name[dot_pos + 1..];
+                        // Split schema.name if present (use last dot for robustness)
+                        if let Some((seq_schema, seq_name)) = full_seq_name.rsplit_once('.') {
                             col_args.push(format!(
                                 "Sequence({}, schema={})",
                                 format_python_string_literal(seq_name),
@@ -1221,8 +1219,9 @@ mod tests {
         ]);
         let gen = TablesGenerator;
         let output = gen.generate(&schema, &GeneratorOptions::default());
-        // Schema-qualified sequence: should parse and emit Sequence with schema
-        assert!(output.contains("Sequence("));
-        assert!(output.contains("test_seq"));
+        // Schema-qualified sequence: split into name + schema kwarg
+        assert!(output.contains("'test_seq'"));
+        assert!(output.contains("schema='testschema'"));
+        assert!(!output.contains("'testschema.test_seq'"));
     }
 }
