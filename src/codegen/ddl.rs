@@ -460,17 +460,27 @@ fn translate_default_function(expr: &str, target: Dialect) -> String {
 }
 
 /// Generate a qualified table name with schema prefix if non-default.
+/// Maps source default schemas to target default schemas (e.g. PG "public" → MSSQL "dbo").
 fn qualified_table_name(schema: &str, table: &str, dialect: Dialect) -> String {
     let default_schema = dialect.default_schema();
+
+    // Suppress schema if it matches the target's default
     if schema.is_empty() || schema == default_schema {
-        quote_identifier(table, dialect)
-    } else {
-        format!(
-            "{}.{}",
-            quote_identifier(schema, dialect),
-            quote_identifier(table, dialect)
-        )
+        return quote_identifier(table, dialect);
     }
+
+    // Map other dialects' default schemas to the target's default
+    // (e.g., source "public" when targeting MSSQL → use unqualified name under dbo)
+    let is_source_default = schema == "public" || schema == "dbo" || schema == "main";
+    if is_source_default {
+        return quote_identifier(table, dialect);
+    }
+
+    format!(
+        "{}.{}",
+        quote_identifier(schema, dialect),
+        quote_identifier(table, dialect)
+    )
 }
 
 /// Generate CREATE INDEX statements for a table.
@@ -613,6 +623,15 @@ fn detect_fk_cycles(tables: &[TableInfo]) -> bool {
     false
 }
 
+/// Normalize default schemas to empty string for cross-dialect comparison.
+/// PG "public", MSSQL "dbo", SQLite "main" are all treated as equivalent.
+fn normalize_diff_schema(schema: &str) -> &str {
+    match schema {
+        "public" | "dbo" | "main" | "" => "",
+        other => other,
+    }
+}
+
 /// Diff two schemas and emit ALTER statements.
 /// Phase 1: tables and columns only.
 fn diff_schemas(
@@ -623,16 +642,18 @@ fn diff_schemas(
     let source_dialect = source.dialect;
     let target_dialect = options.target_dialect;
 
-    // Key by (schema, table_name) to handle multi-schema introspection
+    // Key by table name, normalizing default schemas across dialects.
+    // PG "public", MSSQL "dbo", SQLite "main" are all treated as the default
+    // and matched against each other so cross-dialect diffs work correctly.
     let source_map: HashMap<(&str, &str), &TableInfo> = source
         .tables
         .iter()
-        .map(|t| ((t.schema.as_str(), t.name.as_str()), t))
+        .map(|t| ((normalize_diff_schema(&t.schema), t.name.as_str()), t))
         .collect();
     let target_map: HashMap<(&str, &str), &TableInfo> = target
         .tables
         .iter()
-        .map(|t| ((t.schema.as_str(), t.name.as_str()), t))
+        .map(|t| ((normalize_diff_schema(&t.schema), t.name.as_str()), t))
         .collect();
 
     let mut stmts: Vec<String> = Vec::new();
@@ -643,7 +664,7 @@ fn diff_schemas(
         if table.table_type != TableType::Table {
             continue;
         }
-        let key = (table.schema.as_str(), table.name.as_str());
+        let key = (normalize_diff_schema(&table.schema), table.name.as_str());
         if !target_map.contains_key(&key) {
             stmts.push(generate_create_table(
                 table,
@@ -662,7 +683,7 @@ fn diff_schemas(
         if table.table_type != TableType::Table {
             continue;
         }
-        let key = (table.schema.as_str(), table.name.as_str());
+        let key = (normalize_diff_schema(&table.schema), table.name.as_str());
         if let Some(target_table) = target_map.get(&key) {
             let alters = diff_table_columns(
                 table,
