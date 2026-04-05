@@ -1,5 +1,6 @@
 mod cli;
 mod codegen;
+mod ddl_typemap;
 mod dialect;
 mod error;
 mod introspect;

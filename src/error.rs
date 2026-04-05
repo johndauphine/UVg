@@ -19,4 +19,10 @@ pub enum UvgError {
 
     #[error("Unknown generator: {0}")]
     UnknownGenerator(String),
+
+    #[error("Invalid dialect: {0}")]
+    InvalidDialect(String),
+
+    #[error("--{0} is only valid with --generator ddl")]
+    DdlOnlyOption(String),
 }
