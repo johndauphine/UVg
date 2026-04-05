@@ -8,9 +8,10 @@ use crate::codegen::relationships::{
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
     format_python_string_literal, format_server_default, generate_enum_class, has_primary_key,
-    is_primary_key_column, is_serial_default, is_unique_constraint_index,
+    is_primary_key_column, is_serial_default, is_unique_constraint_index, parse_check_enum,
     quote_constraint_columns, topo_sort_tables, Generator,
 };
+use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
 use crate::naming::{column_to_attr_name, table_to_class_name, table_to_variable_name};
 use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
@@ -45,16 +46,54 @@ impl Generator for DeclarativeGenerator {
 
         let metadata_ref = if has_any_pk { "Base.metadata" } else { "metadata" };
 
-        // Track which enums are used
-        let mut used_enums: Vec<&crate::schema::EnumInfo> = Vec::new();
+        // Collect named enums and synthetic enums from check constraints
+        let mut all_enums: Vec<EnumInfo> = schema.enums.clone();
+        let mut synthetic_enum_cols: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
 
         let sorted_tables = topo_sort_tables(&schema.tables);
-        for table in sorted_tables {
-            // Track enum usage
-            for col_info in &table.columns {
-                if let Some(ei) = find_enum_for_column(&col_info.udt_name, &schema.enums) {
-                    if !used_enums.iter().any(|e| e.schema == ei.schema && e.name == ei.name) {
-                        used_enums.push(ei);
+
+        // Extract synthetic enums from check constraints
+        for table_ref in &sorted_tables {
+            for constraint in &table_ref.constraints {
+                if constraint.constraint_type == ConstraintType::Check {
+                    if let Some(ref expr) = constraint.check_expression {
+                        if let Some((col_name, values)) = parse_check_enum(expr) {
+                            let key = (table_ref.name.clone(), col_name.clone());
+                            if !synthetic_enum_cols.contains_key(&key) {
+                                use heck::ToUpperCamelCase;
+                                let enum_name =
+                                    format!("{}_{}", table_ref.name, col_name).to_upper_camel_case();
+                                let ei = EnumInfo {
+                                    name: enum_name.clone(),
+                                    schema: None,
+                                    values,
+                                };
+                                all_enums.push(ei);
+                                synthetic_enum_cols.insert(key, enum_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Track which enums are used
+        let mut used_enum_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for table in &sorted_tables {
+            // Only track enum usage for tables that will render Enum() types
+            // (classes with PK, not fallback Table() or association tables)
+            let renders_enums = has_primary_key(&table.constraints) && !is_association_table(table);
+            if renders_enums {
+                for col_info in &table.columns {
+                    if find_enum_for_column(&col_info.udt_name, &all_enums).is_some() {
+                        used_enum_names.insert(col_info.udt_name.clone());
+                    }
+                    let key = (table.name.clone(), col_info.name.clone());
+                    if let Some(class_name) = synthetic_enum_cols.get(&key) {
+                        used_enum_names.insert(class_name.clone());
                     }
                 }
             }
@@ -64,7 +103,7 @@ impl Generator for DeclarativeGenerator {
                 let block = generate_association_table(table, &mut imports, options, schema.dialect, metadata_ref);
                 blocks.push(block);
             } else if has_primary_key(&table.constraints) {
-                let (block, meta) = generate_class(table, &mut imports, options, schema.dialect, schema);
+                let (block, meta) = generate_class(table, &mut imports, options, schema.dialect, schema, &all_enums, &synthetic_enum_cols);
                 if meta.needs_optional {
                     needs_optional = true;
                 }
@@ -84,6 +123,14 @@ impl Generator for DeclarativeGenerator {
                 blocks.push(block);
             }
         }
+
+        let used_enums: Vec<&EnumInfo> = all_enums
+            .iter()
+            .filter(|ei| {
+                used_enum_names.contains(&ei.name)
+                    || used_enum_names.contains(&enum_class_name(&ei.name))
+            })
+            .collect();
 
         if !used_enums.is_empty() {
             imports.add_bare("enum");
@@ -140,6 +187,8 @@ fn generate_class(
     options: &GeneratorOptions,
     dialect: Dialect,
     schema: &IntrospectedSchema,
+    all_enums: &[EnumInfo],
+    synthetic_enum_cols: &std::collections::HashMap<(String, String), String>,
 ) -> (String, ClassMeta) {
     let class_name = table_to_class_name(&table.name);
     let mut lines: Vec<String> = Vec::new();
@@ -203,9 +252,20 @@ fn generate_class(
     for (idx, col) in table.columns.iter().enumerate() {
         let attr_name = &attr_names[idx];
 
-        // Resolve column type: check for enum first, then regular type mapping
-        let enum_info = find_enum_for_column(&col.udt_name, &schema.enums);
-        let (sa_type_str, python_type) = if let Some(ei) = enum_info {
+        // Resolve column type: check for synthetic enum, then named enum, then regular type mapping
+        let synthetic_key = (table.name.clone(), col.name.clone());
+        let synthetic_class = synthetic_enum_cols.get(&synthetic_key);
+        let enum_info = if synthetic_class.is_some() {
+            None // synthetic enums handled separately
+        } else {
+            find_enum_for_column(&col.udt_name, all_enums)
+        };
+        let (sa_type_str, python_type) = if let Some(cls) = synthetic_class {
+            let sa = format!(
+                "Enum({cls}, values_callable=lambda cls: [member.value for member in cls])"
+            );
+            (sa, cls.clone())
+        } else if let Some(ei) = enum_info {
             let cls = enum_class_name(&ei.name);
             let mut enum_parts = vec![
                 cls.clone(),
@@ -1676,5 +1736,136 @@ mod tests {
         // so it passes through as-is. The relationship() calls still work.
         assert!(output.contains("relationship: Mapped[Optional[str]]") || output.contains("relationship_: Mapped[Optional[str]]"));
         assert!(output.contains("relationship('SimpleItems'"));
+    }
+
+    /// Adapted from sqlacodegen test_manytomany_nobidi.
+    #[test]
+    fn test_declarative_manytomany_nobidi() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+            table("simple_containers")
+                .column(col("id").build())
+                .pk("simple_containers_pkey", &["id"])
+                .build(),
+            table("container_items")
+                .column(col("item_id").nullable().build())
+                .column(col("container_id").nullable().build())
+                .fk("ci_item_fkey", &["item_id"], "simple_items", &["id"])
+                .fk("ci_container_fkey", &["container_id"], "simple_containers", &["id"])
+                .build(),
+        ]);
+        let opts = GeneratorOptions {
+            nobidi: true,
+            ..GeneratorOptions::default()
+        };
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &opts);
+        // M2M relationships exist but without back_populates
+        assert!(output.contains("relationship("));
+        assert!(!output.contains("back_populates"));
+    }
+
+    /// Adapted from sqlacodegen test_joined_inheritance_same_table_name.
+    #[test]
+    fn test_declarative_joined_inheritance_same_table_name() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("data1").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .build(),
+            table("simple_sub_items")
+                .column(col("simple_items_id").build())
+                .column(col("data2").nullable().build())
+                .pk("simple_sub_items_pkey", &["simple_items_id"])
+                .fk("ssi_fkey", &["simple_items_id"], "simple_items", &["id"])
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Child inherits from parent
+        assert!(output.contains("class SimpleSubItems(SimpleItems):"));
+        // FK on PK column
+        assert!(output.contains("simple_items_id: Mapped[int] = mapped_column(ForeignKey('simple_items.id'), primary_key=True)"));
+    }
+
+    /// Adapted from sqlacodegen test_synthetic_enum_generation (declarative).
+    #[test]
+    fn test_declarative_synthetic_enum() {
+        let schema = schema_pg(vec![
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("status").udt("varchar").nullable().build())
+                .pk("simple_items_pkey", &["id"])
+                .check("", "simple_items.status IN ('active', 'inactive', 'pending')")
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Synthetic enum class
+        assert!(output.contains("class SimpleItemsStatus(str, enum.Enum):"));
+        assert!(output.contains("ACTIVE = 'active'"));
+    }
+
+    /// Adapted from sqlacodegen test_onetomany_multiref_composite.
+    #[test]
+    fn test_declarative_onetomany_multiref_composite() {
+        let schema = schema_pg(vec![
+            table("simple_containers")
+                .column(col("id1").build())
+                .column(col("id2").build())
+                .pk("sc_pkey", &["id1", "id2"])
+                .build(),
+            table("simple_items")
+                .column(col("id").build())
+                .column(col("container1_id1").nullable().build())
+                .column(col("container1_id2").nullable().build())
+                .column(col("container2_id1").nullable().build())
+                .column(col("container2_id2").nullable().build())
+                .pk("si_pkey", &["id"])
+                .fk_full("si_c1_fkey", &["container1_id1", "container1_id2"], "public", "simple_containers", &["id1", "id2"], "NO ACTION", "NO ACTION")
+                .fk_full("si_c2_fkey", &["container2_id1", "container2_id2"], "public", "simple_containers", &["id1", "id2"], "NO ACTION", "NO ACTION")
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Two ForeignKeyConstraints in __table_args__
+        assert!(output.contains("ForeignKeyConstraint(['container1_id1', 'container1_id2']"));
+        assert!(output.contains("ForeignKeyConstraint(['container2_id1', 'container2_id2']"));
+    }
+
+    /// Adapted from sqlacodegen test_manytomany_composite.
+    #[test]
+    fn test_declarative_manytomany_composite() {
+        // M2M with composite FKs is NOT detected as association table
+        // (is_association_table requires single-column FKs)
+        let schema = schema_pg(vec![
+            table("left_table")
+                .column(col("id1").build())
+                .column(col("id2").build())
+                .pk("lt_pkey", &["id1", "id2"])
+                .build(),
+            table("right_table")
+                .column(col("id1").build())
+                .column(col("id2").build())
+                .pk("rt_pkey", &["id1", "id2"])
+                .build(),
+            table("assoc")
+                .column(col("left_id1").nullable().build())
+                .column(col("left_id2").nullable().build())
+                .column(col("right_id1").nullable().build())
+                .column(col("right_id2").nullable().build())
+                .fk_full("a_left_fkey", &["left_id1", "left_id2"], "public", "left_table", &["id1", "id2"], "NO ACTION", "NO ACTION")
+                .fk_full("a_right_fkey", &["right_id1", "right_id2"], "public", "right_table", &["id1", "id2"], "NO ACTION", "NO ACTION")
+                .build(),
+        ]);
+        let gen = DeclarativeGenerator;
+        let output = gen.generate(&schema, &GeneratorOptions::default());
+        // Composite M2M: assoc is NOT an association table (requires single-col FKs)
+        // So it gets Table() fallback (no PK)
+        assert!(output.contains("t_assoc = Table("));
     }
 }
