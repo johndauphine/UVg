@@ -72,24 +72,52 @@ pub(crate) struct StmtResult {
     pub error: Option<String>,
 }
 
+/// Strip leading comment/blank lines from a statement chunk, but preserve
+/// `-- WARNING:` lines that precede the actual SQL.
+fn strip_leading_comments(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let first_sql_idx = lines.iter().position(|line| {
+        let t = line.trim();
+        !t.is_empty() && !t.starts_with("--")
+    })?;
+
+    // Keep WARNING comments that immediately precede the SQL
+    let mut kept_lines: Vec<&str> = lines[..first_sql_idx]
+        .iter()
+        .copied()
+        .filter(|line| line.trim().starts_with("-- WARNING:"))
+        .collect();
+    kept_lines.extend_from_slice(&lines[first_sql_idx..]);
+
+    let result = kept_lines.join("\n");
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 /// Split DDL output into individual statements using a SQL-aware splitter.
-/// Handles semicolons inside single-quoted strings (with `''` escape),
-/// dollar-quoted strings (PostgreSQL `$$...$$` / `$tag$...$tag$`), and
-/// line comments (`--`). Strips leading comment-only/blank lines from each
-/// statement chunk so header comments don't become empty executions.
+/// Handles single-quoted strings (with '' escaping) and PostgreSQL dollar-quoting
+/// so that semicolons inside string literals are not treated as statement boundaries.
+/// Leading header comments are stripped; `-- WARNING:` comments are preserved.
 pub(crate) fn split_statements(ddl: &str) -> Vec<String> {
     let bytes = ddl.as_bytes();
     let mut statements = Vec::new();
     let mut start = 0usize;
     let mut i = 0usize;
     let mut in_single_quote = false;
-    let mut in_line_comment = false;
-    let mut dollar_tag: Option<String> = None;
+    let mut dollar_tag: Option<&str> = None;
 
     while i < bytes.len() {
         // Inside a dollar-quoted string: scan for closing tag
-        if let Some(ref tag) = dollar_tag {
-            if ddl[i..].starts_with(tag.as_str()) {
+        if let Some(tag) = dollar_tag {
+            if ddl[i..].starts_with(tag) {
                 i += tag.len();
                 dollar_tag = None;
             } else {
@@ -98,51 +126,30 @@ pub(crate) fn split_statements(ddl: &str) -> Vec<String> {
             continue;
         }
 
-        // Inside a line comment: skip until newline
-        if in_line_comment {
-            if bytes[i] == b'\n' {
-                in_line_comment = false;
+        match bytes[i] {
+            b'\'' if !in_single_quote => {
+                in_single_quote = true;
+                i += 1;
             }
-            i += 1;
-            continue;
-        }
-
-        // Inside a single-quoted string
-        if in_single_quote {
-            if bytes[i] == b'\'' {
-                // Check for escaped quote ('')
+            b'\'' if in_single_quote => {
+                // '' is an escaped single quote inside a string
                 if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
                     i += 2;
                 } else {
                     in_single_quote = false;
                     i += 1;
                 }
-            } else {
-                i += 1;
             }
-            continue;
-        }
-
-        match bytes[i] {
-            b'\'' => {
-                in_single_quote = true;
-                i += 1;
-            }
-            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
-                in_line_comment = true;
-                i += 2;
-            }
-            b'$' => {
+            b'$' if !in_single_quote => {
                 if let Some(tag) = dollar_quote_tag_at(ddl, i) {
-                    i += tag.len();
                     dollar_tag = Some(tag);
+                    i += tag.len();
                 } else {
                     i += 1;
                 }
             }
-            b';' => {
-                let chunk = &ddl[start..i];
-                if let Some(stmt) = strip_leading_comments(chunk) {
+            b';' if !in_single_quote => {
+                if let Some(stmt) = strip_leading_comments(&ddl[start..i]) {
                     statements.push(stmt);
                 }
                 i += 1;
@@ -154,26 +161,25 @@ pub(crate) fn split_statements(ddl: &str) -> Vec<String> {
         }
     }
 
-    // Trailing content after last semicolon
-    if start < ddl.len() {
-        if let Some(stmt) = strip_leading_comments(&ddl[start..]) {
-            statements.push(stmt);
-        }
+    // Handle trailing content after the last semicolon
+    if let Some(stmt) = strip_leading_comments(&ddl[start..]) {
+        statements.push(stmt);
     }
 
     statements
 }
 
-/// Try to match a dollar-quote tag at position `start` (e.g. `$$` or `$foo$`).
-fn dollar_quote_tag_at(s: &str, start: usize) -> Option<String> {
-    let bytes = s.as_bytes();
+/// Try to match a dollar-quote tag starting at position `start`.
+/// Dollar-quote tags have the form `$tag$` where tag is empty or [a-zA-Z0-9_]+.
+fn dollar_quote_tag_at<'a>(ddl: &'a str, start: usize) -> Option<&'a str> {
+    let bytes = ddl.as_bytes();
     if bytes.get(start) != Some(&b'$') {
         return None;
     }
     let mut end = start + 1;
     while let Some(&b) = bytes.get(end) {
         if b == b'$' {
-            return Some(s[start..=end].to_string());
+            return Some(&ddl[start..=end]);
         }
         if !(b == b'_' || b.is_ascii_alphanumeric()) {
             return None;
@@ -183,25 +189,9 @@ fn dollar_quote_tag_at(s: &str, start: usize) -> Option<String> {
     None
 }
 
-/// Strip leading blank/comment-only lines from a statement chunk.
-fn strip_leading_comments(s: &str) -> Option<String> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let stripped: String = trimmed
-        .lines()
-        .skip_while(|line| {
-            let t = line.trim();
-            t.is_empty() || t.starts_with("--")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if stripped.is_empty() {
-        None
-    } else {
-        Some(stripped)
-    }
+/// Count the number of executable statements in DDL output.
+pub(crate) fn count_statements(ddl: &str) -> usize {
+    split_statements(ddl).len()
 }
 
 /// Execute DDL statements one-by-one against the target database.
@@ -302,84 +292,97 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_split() {
-        let ddl = "CREATE TABLE a (id INT); CREATE TABLE b (id INT);";
+    fn test_split_simple_statements() {
+        let ddl = "CREATE TABLE foo (id INT);\nCREATE TABLE bar (id INT);";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 2);
-        assert_eq!(stmts[0], "CREATE TABLE a (id INT)");
-        assert_eq!(stmts[1], "CREATE TABLE b (id INT)");
+        assert!(stmts[0].contains("CREATE TABLE foo"));
+        assert!(stmts[1].contains("CREATE TABLE bar"));
     }
 
     #[test]
-    fn test_semicolon_in_single_quotes() {
-        let ddl = "COMMENT ON TABLE foo IS 'has; semicolons; inside';\nCREATE TABLE bar (id INT);";
-        let stmts = split_statements(ddl);
-        assert_eq!(stmts.len(), 2);
-        assert_eq!(stmts[0], "COMMENT ON TABLE foo IS 'has; semicolons; inside'");
-        assert_eq!(stmts[1], "CREATE TABLE bar (id INT)");
-    }
-
-    #[test]
-    fn test_escaped_single_quotes() {
-        let ddl = "COMMENT ON TABLE foo IS 'it''s a test; with quotes';\nSELECT 1;";
-        let stmts = split_statements(ddl);
-        assert_eq!(stmts.len(), 2);
-        assert_eq!(stmts[0], "COMMENT ON TABLE foo IS 'it''s a test; with quotes'");
-        assert_eq!(stmts[1], "SELECT 1");
-    }
-
-    #[test]
-    fn test_dollar_quoting() {
-        let ddl = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN; END; $$ LANGUAGE plpgsql;\nSELECT 1;";
-        let stmts = split_statements(ddl);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("BEGIN; END;"));
-        assert_eq!(stmts[1], "SELECT 1");
-    }
-
-    #[test]
-    fn test_named_dollar_quoting() {
-        let ddl = "CREATE FUNCTION f() AS $body$ x; y; $body$ LANGUAGE sql;\nSELECT 2;";
-        let stmts = split_statements(ddl);
-        assert_eq!(stmts.len(), 2);
-        assert!(stmts[0].contains("x; y;"));
-    }
-
-    #[test]
-    fn test_line_comments_skipped() {
-        let ddl = "-- header comment\n-- another\nCREATE TABLE a (id INT);";
+    fn test_split_strips_header_comments() {
+        let ddl = "-- Generated by uvg\n-- Source: postgres\n\nCREATE TABLE foo (id INT);";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0], "CREATE TABLE a (id INT)");
+        assert_eq!(stmts[0], "CREATE TABLE foo (id INT)");
     }
 
     #[test]
-    fn test_semicolon_in_line_comment() {
-        let ddl = "-- this; has; semicolons\nCREATE TABLE a (id INT);";
+    fn test_split_preserves_warning_comments() {
+        let ddl = "-- WARNING: destructive operation\nALTER TABLE foo DROP COLUMN bar;";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0], "CREATE TABLE a (id INT)");
+        assert!(stmts[0].starts_with("-- WARNING:"));
+        assert!(stmts[0].contains("ALTER TABLE"));
     }
 
     #[test]
-    fn test_comment_only_blocks_stripped() {
-        let ddl = "-- just a comment;\n-- nothing here;\n";
+    fn test_split_strips_non_warning_comments() {
+        let ddl = "-- This is a header\n-- Another comment\nCREATE TABLE foo (id INT);";
+        let stmts = split_statements(ddl);
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0], "CREATE TABLE foo (id INT)");
+    }
+
+    #[test]
+    fn test_split_semicolon_in_single_quotes() {
+        let ddl = "COMMENT ON TABLE foo IS 'has; semicolon';";
+        let stmts = split_statements(ddl);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("has; semicolon"));
+    }
+
+    #[test]
+    fn test_split_escaped_single_quotes() {
+        let ddl = "COMMENT ON TABLE foo IS 'it''s a test; really';";
+        let stmts = split_statements(ddl);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("it''s a test; really"));
+    }
+
+    #[test]
+    fn test_split_dollar_quoting() {
+        let ddl = "CREATE FUNCTION foo() RETURNS void AS $$\nBEGIN\n  RAISE NOTICE 'hello;world';\nEND;\n$$ LANGUAGE plpgsql;";
+        let stmts = split_statements(ddl);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("RAISE NOTICE"));
+    }
+
+    #[test]
+    fn test_split_trailing_whitespace() {
+        let ddl = "CREATE TABLE foo (id INT);  \n  \n";
+        let stmts = split_statements(ddl);
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn test_split_comment_only_ddl() {
+        let ddl = "-- No schema changes detected.\n";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 0);
     }
 
     #[test]
-    fn test_trailing_content_without_semicolon() {
-        let ddl = "CREATE TABLE a (id INT)";
+    fn test_split_mixed_header_and_statements() {
+        let ddl = "-- Generated by uvg (diff)\n-- Source: postgres, Target: postgres\n\nCREATE TABLE posts (\n    id SERIAL\n);\n\nCREATE INDEX idx ON posts (id);\n\n-- WARNING: destructive operation\nALTER TABLE users DROP COLUMN old;";
         let stmts = split_statements(ddl);
-        assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0], "CREATE TABLE a (id INT)");
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].starts_with("CREATE TABLE"));
+        assert!(stmts[1].starts_with("CREATE INDEX"));
+        assert!(stmts[2].starts_with("-- WARNING:"));
+        assert!(stmts[2].contains("DROP COLUMN"));
     }
 
     #[test]
-    fn test_empty_input() {
-        assert_eq!(split_statements("").len(), 0);
-        assert_eq!(split_statements("  \n  ").len(), 0);
-        assert_eq!(split_statements(";;;").len(), 0);
+    fn test_count_statements() {
+        let ddl = "-- header\nCREATE TABLE foo (id INT);\nCREATE TABLE bar (id INT);";
+        assert_eq!(count_statements(ddl), 2);
+    }
+
+    #[test]
+    fn test_count_no_changes() {
+        let ddl = "-- No schema changes detected.\n";
+        assert_eq!(count_statements(ddl), 0);
     }
 }

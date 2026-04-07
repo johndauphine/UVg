@@ -106,12 +106,11 @@ async fn event_loop(
 
         match &app.state {
             AppState::Generating => {
-                // Run introspection + DDL generation (blocks, but that's fine for a simple TUI)
                 let result = generate_ddl(app).await;
                 match result {
                     Ok(ddl) => {
                         app.ddl_output = ddl;
-                        app.stmt_count = count_statements(&app.ddl_output);
+                        app.stmt_count = db::count_statements(&app.ddl_output);
                         app.scroll_offset = 0;
                         app.error_msg = None;
                         app.state = AppState::ViewDdl;
@@ -121,7 +120,7 @@ async fn event_loop(
                         app.state = AppState::InputUrls;
                     }
                 }
-                continue; // re-render immediately
+                continue;
             }
             AppState::Applying => {
                 let result = apply_ddl(app).await;
@@ -156,30 +155,35 @@ async fn event_loop(
             _ => {}
         }
 
-        // Poll for input with a short timeout to keep responsive
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Global quit: Ctrl-C
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
-                {
-                    return Ok(());
-                }
+        // Poll for input on a blocking thread to avoid starving the tokio runtime
+        if let Some(Event::Key(key)) = tokio::task::spawn_blocking(|| -> std::io::Result<Option<Event>> {
+            if event::poll(Duration::from_millis(100))? {
+                Ok(Some(event::read()?))
+            } else {
+                Ok(None)
+            }
+        })
+        .await?? {
+            // Global quit: Ctrl-C
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+            {
+                return Ok(());
+            }
 
-                match &app.state {
-                    AppState::InputUrls => handle_input_keys(app, key.code),
-                    AppState::ViewDdl => handle_view_keys(app, key.code),
-                    AppState::Confirming => handle_confirm_keys(app, key.code),
-                    AppState::Done => handle_done_keys(app, key.code),
-                    _ => {}
-                }
+            match &app.state {
+                AppState::InputUrls => handle_input_keys(app, key.code),
+                AppState::ViewDdl => handle_view_keys(app, key.code),
+                AppState::Confirming => handle_confirm_keys(app, key.code),
+                AppState::Done => handle_done_keys(app, key.code),
+                _ => {}
+            }
 
-                // Check if user wants to quit
-                if matches!(app.state, AppState::InputUrls)
-                    && key.code == KeyCode::Esc
-                    && app.error_msg.is_none()
-                {
-                    return Ok(());
-                }
+            // Check if user wants to quit
+            if matches!(app.state, AppState::InputUrls)
+                && key.code == KeyCode::Esc
+                && app.error_msg.is_none()
+            {
+                return Ok(());
             }
         }
     }
@@ -413,13 +417,20 @@ fn render_input(f: &mut Frame, app: &App) {
         );
     f.render_widget(target, chunks[2]);
 
-    // Place cursor
+    // Place cursor (clamped to field bounds)
     let field_chunk = if app.focused_field == 0 {
         chunks[1]
     } else {
         chunks[2]
     };
-    let cursor_x = field_chunk.x + 1 + app.cursor() as u16;
+    let inner_x = field_chunk.x.saturating_add(1);
+    let inner_width = field_chunk.width.saturating_sub(2);
+    let cursor_offset = u16::try_from(app.cursor()).unwrap_or(u16::MAX);
+    let cursor_x = if inner_width == 0 {
+        field_chunk.x
+    } else {
+        inner_x + cursor_offset.min(inner_width.saturating_sub(1))
+    };
     let cursor_y = field_chunk.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 
@@ -466,7 +477,8 @@ fn render_ddl_view(f: &mut Frame, app: &App) {
             Block::default()
                 .title(format!(
                     " DDL Diff: {} -> {} ",
-                    app.source_url, app.target_url
+                    mask_url_password(&app.source_url),
+                    mask_url_password(&app.target_url),
                 ))
                 .borders(Borders::ALL),
         )
@@ -592,22 +604,14 @@ async fn generate_ddl(app: &mut App) -> Result<String> {
     let source_schema =
         db::introspect_with_config(source_config, &source_schemas, &[], false, &options).await?;
 
-    // Introspect target
+    // Introspect target (re-parse config since introspect consumes it)
     let target_schemas = if let Some(db) = target_config.database_name() {
         vec![db]
     } else {
         vec![target_dialect.default_schema().to_string()]
     };
-
     let target_schema_data =
-        db::introspect_with_config(
-            make_cli(&target_url, app.trust_cert).parse_connection()?,
-            &target_schemas,
-            &[],
-            false,
-            &options,
-        )
-        .await?;
+        db::introspect_with_config(target_config, &target_schemas, &[], false, &options).await?;
 
     // Generate DDL diff
     let ddl_opts = DdlOptions {
@@ -625,7 +629,6 @@ async fn generate_ddl(app: &mut App) -> Result<String> {
     match output {
         DdlOutput::Single(content) => Ok(content),
         DdlOutput::Split(files) => {
-            // Concatenate split files for display
             Ok(files
                 .into_iter()
                 .map(|(name, content)| format!("-- File: {name}\n{content}"))
@@ -659,6 +662,31 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
     }
 }
 
-fn count_statements(ddl: &str) -> usize {
-    db::split_statements(ddl).len()
+/// Mask the password portion of a database URL for display.
+/// Replaces `user:password@` with `user:***@`.
+fn mask_url_password(url: &str) -> String {
+    // Find the scheme separator
+    let after_scheme = match url.find("://") {
+        Some(i) => i + 3,
+        None => return url.to_string(),
+    };
+
+    let rest = &url[after_scheme..];
+
+    // Find the @ separator (credentials end here)
+    let at_pos = match rest.find('@') {
+        Some(i) => i,
+        None => return url.to_string(), // no credentials
+    };
+
+    let credentials = &rest[..at_pos];
+
+    // Find the colon separating user from password
+    match credentials.find(':') {
+        Some(colon) => {
+            let user = &credentials[..colon];
+            format!("{}://{}:***@{}", &url[..after_scheme - 3], user, &rest[at_pos + 1..])
+        }
+        None => url.to_string(), // no password
+    }
 }
