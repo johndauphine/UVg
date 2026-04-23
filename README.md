@@ -3,9 +3,15 @@
 [![Crates.io](https://img.shields.io/crates/v/uvg.svg)](https://crates.io/crates/uvg)
 [![License](https://img.shields.io/crates/l/uvg.svg)](#license)
 
-A Rust reimplementation of [sqlacodegen](https://github.com/agronholm/sqlacodegen) — connects to a PostgreSQL, MySQL, SQLite, or Microsoft SQL Server database, introspects its schema, and generates SQLAlchemy Python model code.
+Fast schema introspection for PostgreSQL, MySQL, SQLite, and MSSQL. Generates SQLAlchemy models, cross-dialect DDL, or migration diffs — with an interactive TUI for reviewing and applying changes. Drop-in replacement for [sqlacodegen](https://github.com/agronholm/sqlacodegen).
 
-Single binary, drop-in compatible CLI, same output. Plus cross-dialect DDL migration and an interactive TUI.
+## What UVg does
+
+- **SQLAlchemy model generation** — declarative ORM classes or `Table()` metadata, byte-for-byte compatible with sqlacodegen output.
+- **Cross-dialect DDL** — introspect one database and emit `CREATE TABLE` statements for a different engine, with automatic type translation (`jsonb` → `JSON`, `uuid` → `UNIQUEIDENTIFIER`, and so on across all 16 source×target permutations).
+- **Schema diff** — compare a source database against a target and emit `ALTER TABLE` statements to converge them.
+- **Interactive TUI** — enter two URLs, scroll through the generated diff, and apply it to the target with a confirmation prompt.
+- **Fast** — single static binary; ~10× faster than sqlacodegen on PostgreSQL and ~40× on MSSQL.
 
 ## Installation
 
@@ -29,48 +35,59 @@ cargo install --path .
 
 ## Usage
 
+UVg accepts SQLAlchemy-style URLs for both the source and (optional) target database:
+
 ```
-uvg <database-url>
+postgresql://user:pass@host/db
+mysql://user:pass@host/db
+sqlite:///path/to/db.sqlite
+mssql://user:pass@host/db
 ```
 
-Accepts SQLAlchemy-style URLs:
+### Generate SQLAlchemy models
 
 ```bash
-# PostgreSQL
-uvg postgresql://user:pass@localhost/mydb
+# Modern declarative classes (default)
+uvg postgresql://localhost/mydb -o models.py
 
-# MySQL / MariaDB
-uvg mysql://user:pass@localhost/mydb
+# Core Table() metadata objects
+uvg --generator tables postgresql://localhost/mydb -o models.py
 
-# SQLite
-uvg sqlite:///path/to/database.db
-
-# Microsoft SQL Server
-uvg mssql://user:pass@localhost/mydb
-
-# Table objects instead of declarative classes
-uvg --generator tables postgresql://user:pass@localhost/mydb
+# One file per table
+uvg --split-tables --outfile models/ postgresql://localhost/mydb
 
 # Filter specific tables
-uvg --tables users,posts mysql://user:pass@localhost/mydb
+uvg --tables users,posts postgresql://localhost/mydb
+```
 
-# Write to file
-uvg --outfile models.py sqlite:///myapp.db
+### Generate DDL in another dialect
 
-# One file per table/class
-uvg --split-tables --outfile models/ postgresql://user:pass@localhost/mydb
+Introspect a database and emit `CREATE TABLE` statements for a different engine. Types are translated automatically.
 
-# Generate DDL for a different database engine
-uvg postgresql://source/db --generator ddl --target-dialect mysql
+```bash
+# PostgreSQL schema -> MySQL DDL
+uvg postgresql://localhost/mydb --generator ddl --target-dialect mysql -o schema.sql
 
-# Generate DDL with file per table
-uvg postgresql://source/db --generator ddl --target-dialect mysql --split-tables --outfile ddl/
+# MSSQL schema -> SQLite DDL, one file per table
+uvg mssql://localhost/mydb --generator ddl --target-dialect sqlite --split-tables -o ddl/
+```
 
-# Diff source against target, emit ALTER statements
-uvg postgresql://source/db mysql://target/db --generator ddl
+### Diff two schemas and generate a migration
 
-# Interactive TUI: enter URLs, view diff, optionally apply to target
-uvg -i
+Compare a source database against a live target and emit `ALTER TABLE` statements to converge them.
+
+```bash
+uvg postgresql://source/db mysql://target/db --generator ddl -o migration.sql
+```
+
+The target dialect is inferred from the target URL scheme. Same-dialect migrations converge cleanly — running the diff again after applying shows zero changes.
+
+### Interactive TUI
+
+Launch the TUI to enter source and target URLs, scroll through the generated diff, and apply it to the target with a confirmation prompt.
+
+```bash
+uvg -i                                              # prompts for URLs
 uvg -i postgresql://source/db postgresql://target/db
 ```
 
