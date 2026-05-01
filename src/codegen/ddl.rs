@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::cli::DdlOptions;
 use crate::codegen::{
-    is_primary_key_column, is_serial_default, is_unique_constraint_index, topo_sort_tables,
+    is_auto_increment_column, is_primary_key_column, is_unique_constraint_index, topo_sort_tables,
 };
 use crate::ddl_typemap;
 use crate::dialect::Dialect;
@@ -148,14 +148,8 @@ pub(super) fn generate_create_table(
     // Detect if any column has inline PK AUTOINCREMENT (SQLite)
     let has_inline_pk = target_dialect == Dialect::Sqlite
         && table.columns.iter().any(|col| {
-            let is_auto = col.is_identity
-                || col.autoincrement == Some(true)
-                || col
-                    .column_default
-                    .as_deref()
-                    .map(|d| is_serial_default(d, source_dialect))
-                    .unwrap_or(false);
-            is_auto && is_primary_key_column(&col.name, &table.constraints)
+            is_auto_increment_column(col, source_dialect)
+                && is_primary_key_column(&col.name, &table.constraints)
         });
 
     // Columns
@@ -278,13 +272,7 @@ pub(super) fn generate_column_def(
     let qname = quote_identifier(&col.name, target_dialect);
 
     // Detect auto-increment
-    let is_auto = col.is_identity
-        || col.autoincrement == Some(true)
-        || col
-            .column_default
-            .as_deref()
-            .map(|d| is_serial_default(d, source_dialect))
-            .unwrap_or(false);
+    let is_auto = is_auto_increment_column(col, source_dialect);
 
     let is_pk = is_primary_key_column(&col.name, constraints);
 
