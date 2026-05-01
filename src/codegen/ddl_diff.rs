@@ -245,11 +245,14 @@ fn diff_column(
         .as_deref()
         .map(|d| format_ddl_default_typed(d, target_dialect, target_dialect, is_boolean));
     // Auto-increment columns express their default through dialect-specific
-    // mechanisms (MSSQL IDENTITY → no default; PG SERIAL → nextval(...)). When
-    // both sides are auto-increment, ignore the default-string mismatch.
+    // mechanisms (MSSQL IDENTITY → no default; PG SERIAL → nextval(...)). For
+    // cross-dialect diffs, ignore the resulting default-string mismatch when
+    // both sides are auto-increment. Same-dialect diffs keep the literal
+    // comparison so divergent sequences (e.g. nextval('a') vs nextval('b'))
+    // still surface as real drift.
     let source_auto = is_auto_increment_column(source, source_dialect);
     let target_auto = is_auto_increment_column(target, target_dialect);
-    let default_changed = if source_auto && target_auto {
+    let default_changed = if source_auto && target_auto && source_dialect != target_dialect {
         false
     } else {
         source_default != target_default
@@ -429,6 +432,36 @@ mod tests {
         assert!(
             ddl.contains("No schema changes detected"),
             "MSSQL IDENTITY ↔ PG SERIAL should round-trip with zero diff, got: {ddl}"
+        );
+    }
+
+    #[test]
+    fn test_diff_pg_serial_with_divergent_sequences_still_drifts() {
+        // Same-dialect (PG→PG): two SERIAL-shaped columns pointing at different
+        // sequences should NOT be silently treated as equivalent — that would
+        // hide real drift from custom or renamed sequences.
+        let source = schema_pg(vec![table("users")
+            .column(
+                col("id")
+                    .udt("int4")
+                    .default_val("nextval('seq_a'::regclass)")
+                    .build(),
+            )
+            .pk("pk", &["id"])
+            .build()]);
+        let target = schema_pg(vec![table("users")
+            .column(
+                col("id")
+                    .udt("int4")
+                    .default_val("nextval('seq_b'::regclass)")
+                    .build(),
+            )
+            .pk("pk", &["id"])
+            .build()]);
+        let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
+        assert!(
+            ddl.contains("SET DEFAULT") || ddl.contains("DROP DEFAULT"),
+            "Same-dialect divergent sequences should drift, got: {ddl}"
         );
     }
 
