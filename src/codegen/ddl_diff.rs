@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::cli::DdlOptions;
-use crate::codegen::topo_sort_tables;
+use crate::codegen::{is_auto_increment_column, topo_sort_tables};
 use crate::ddl_typemap;
 use crate::dialect::Dialect;
 use crate::schema::{ColumnInfo, IntrospectedSchema, TableInfo, TableType};
@@ -244,7 +244,19 @@ fn diff_column(
         .column_default
         .as_deref()
         .map(|d| format_ddl_default_typed(d, target_dialect, target_dialect, is_boolean));
-    let default_changed = source_default != target_default;
+    // Auto-increment columns express their default through dialect-specific
+    // mechanisms (MSSQL IDENTITY → no default; PG SERIAL → nextval(...)). For
+    // cross-dialect diffs, ignore the resulting default-string mismatch when
+    // both sides are auto-increment. Same-dialect diffs keep the literal
+    // comparison so divergent sequences (e.g. nextval('a') vs nextval('b'))
+    // still surface as real drift.
+    let source_auto = is_auto_increment_column(source, source_dialect);
+    let target_auto = is_auto_increment_column(target, target_dialect);
+    let default_changed = if source_auto && target_auto && source_dialect != target_dialect {
+        false
+    } else {
+        source_default != target_default
+    };
 
     if !type_changed && !nullable_changed && !default_changed {
         return stmts;
@@ -327,7 +339,7 @@ fn diff_column(
 mod tests {
     use super::*;
     use crate::cli::DdlOptions;
-    use crate::testutil::{col, schema_pg, table};
+    use crate::testutil::{col, schema_mssql, schema_pg, table};
 
     fn default_options(target: Dialect) -> DdlOptions {
         DdlOptions {
@@ -396,6 +408,61 @@ mod tests {
         ]);
         let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
         assert!(ddl.contains("No schema changes detected"), "public should match dbo: {ddl}");
+    }
+
+    #[test]
+    fn test_diff_mssql_identity_to_pg_serial_converges() {
+        // MSSQL source: IDENTITY column with no SQL default.
+        let source = schema_mssql(vec![table("Badges")
+            .schema("dbo")
+            .column(col("Id").udt("int").identity().build())
+            .pk("PK_Badges", &["Id"])
+            .build()]);
+        // PG target: same logical column expressed as SERIAL (nextval(...) default).
+        let target = schema_pg(vec![table("Badges")
+            .column(
+                col("Id")
+                    .udt("int4")
+                    .default_val("nextval('\"Badges_Id_seq\"'::regclass)")
+                    .build(),
+            )
+            .pk("Badges_pkey", &["Id"])
+            .build()]);
+        let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
+        assert!(
+            ddl.contains("No schema changes detected"),
+            "MSSQL IDENTITY ↔ PG SERIAL should round-trip with zero diff, got: {ddl}"
+        );
+    }
+
+    #[test]
+    fn test_diff_pg_serial_with_divergent_sequences_still_drifts() {
+        // Same-dialect (PG→PG): two SERIAL-shaped columns pointing at different
+        // sequences should NOT be silently treated as equivalent — that would
+        // hide real drift from custom or renamed sequences.
+        let source = schema_pg(vec![table("users")
+            .column(
+                col("id")
+                    .udt("int4")
+                    .default_val("nextval('seq_a'::regclass)")
+                    .build(),
+            )
+            .pk("pk", &["id"])
+            .build()]);
+        let target = schema_pg(vec![table("users")
+            .column(
+                col("id")
+                    .udt("int4")
+                    .default_val("nextval('seq_b'::regclass)")
+                    .build(),
+            )
+            .pk("pk", &["id"])
+            .build()]);
+        let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
+        assert!(
+            ddl.contains("SET DEFAULT") || ddl.contains("DROP DEFAULT"),
+            "Same-dialect divergent sequences should drift, got: {ddl}"
+        );
     }
 
     #[test]

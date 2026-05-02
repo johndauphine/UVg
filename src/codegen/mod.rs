@@ -498,6 +498,19 @@ pub fn is_serial_default(default: &str, dialect: Dialect) -> bool {
     }
 }
 
+/// Check if a column is auto-increment in its source dialect.
+/// Unifies MSSQL `IDENTITY`, PG `GENERATED ... AS IDENTITY`, PG `SERIAL` (via
+/// `nextval(...)` default), MySQL `AUTO_INCREMENT`, and SQLite `AUTOINCREMENT`.
+pub fn is_auto_increment_column(col: &crate::schema::ColumnInfo, dialect: Dialect) -> bool {
+    col.is_identity
+        || col.autoincrement == Some(true)
+        || col
+            .column_default
+            .as_deref()
+            .map(|d| is_serial_default(d, dialect))
+            .unwrap_or(false)
+}
+
 /// Extract the sequence name from a nextval default expression.
 /// e.g. "nextval('my_seq'::regclass)" → Some("my_seq")
 pub fn parse_sequence_name(default: &str) -> Option<String> {
