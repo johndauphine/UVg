@@ -167,11 +167,69 @@ pub async fn query_constraints(
             constraint_type: ConstraintType::Check,
             columns: vec![],
             foreign_key: None,
-            check_expression: Some(row.check_clause),
+            check_expression: Some(normalize_mysql_check_clause(&row.check_clause)),
         });
     }
 
     Ok(constraints)
+}
+
+/// Normalize a MySQL CHECK_CLAUSE into a portable form. MySQL stores
+/// constraint predicates with two MySQL-specific quirks that neither
+/// MySQL itself (via the mysql client) nor any other dialect can re-parse:
+///
+///   1. **Charset-prefixed string literals** — `_latin1'foo'` instead of
+///      just `'foo'`. MySQL silently rewrites string literals during
+///      constraint creation to add the charset prefix.
+///   2. **Backslash-escaped single quotes** — `\'foo\'` instead of the
+///      SQL-standard double-doubled `''foo''`. The mysql client's
+///      command parser interprets `\'` as a line-continuation escape
+///      rather than a SQL string-literal escape, so re-applying the
+///      DDL via `mysql ... < file.sql` fails.
+///
+/// We strip the charset prefix and convert backslash-escape to standard
+/// double-quote escape. See #39.
+fn normalize_mysql_check_clause(clause: &str) -> String {
+    // Step 1: convert backslash-escaped single quotes back to plain
+    // quotes. MySQL's information_schema serializes the predicate text
+    // by escaping the original `'` string delimiters as `\'`. To recover
+    // the SQL the user wrote (`customer_type = 'individual'`), unescape
+    // `\'` → `'` (NOT `''` — that would mean an empty string concatenated
+    // with the identifier, which is a parse error). Run this first so
+    // step 2's charset-prefix detection can match the standard `_charset'`
+    // form on the un-escaped output.
+    let dequoted = clause.replace("\\'", "'");
+
+    // Step 2: strip `_charset` prefixes immediately before a single quote.
+    // MySQL charset names match `[a-z][a-z0-9_]+` (e.g. latin1, utf8mb4,
+    // cp1251). A simple state-machine scan is enough — no regex needed.
+    let bytes = dequoted.as_bytes();
+    let mut out = String::with_capacity(dequoted.len());
+    let mut i = 0;
+    let mut last_copied = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'_' {
+            // Look for an underscore-prefixed charset name followed by a
+            // single quote. Scan ahead to see if it matches.
+            let start = i;
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > i + 1 && j < bytes.len() && bytes[j] == b'\'' {
+                // Matched `_<ident>'` — flush prefix-of-input then drop
+                // the underscore-ident span. The quote and onward are
+                // copied in subsequent iterations.
+                out.push_str(&dequoted[last_copied..start]);
+                i = j;
+                last_copied = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&dequoted[last_copied..]);
+    out
 }
 
 struct FkAccumulator {
@@ -219,4 +277,55 @@ struct CheckRow {
     constraint_name: String,
     #[sqlx(rename = "CHECK_CLAUSE")]
     check_clause: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_mysql_check_clause;
+
+    #[test]
+    fn strips_charset_prefix() {
+        // Single charset prefix. After normalization, `\'individual\'` is
+        // un-escaped to `'individual'` (the original SQL string-literal
+        // form) and the leading `_latin1` is stripped.
+        assert_eq!(
+            normalize_mysql_check_clause("`status` = _latin1\\'active\\'"),
+            "`status` = 'active'"
+        );
+        // Multiple in one predicate.
+        assert_eq!(
+            normalize_mysql_check_clause(
+                "`type` in (_latin1\\'company\\',_latin1\\'government\\')"
+            ),
+            "`type` in ('company','government')"
+        );
+        // Different charsets — utf8mb4, cp1251 etc.
+        assert_eq!(
+            normalize_mysql_check_clause("`x` = _utf8mb4\\'a\\'"),
+            "`x` = 'a'"
+        );
+    }
+
+    #[test]
+    fn passes_through_when_no_quirks() {
+        // Predicates that don't have charset prefix or backslash escapes
+        // pass through unchanged.
+        let predicate = "(`is_active` in (0,1))";
+        assert_eq!(normalize_mysql_check_clause(predicate), predicate);
+    }
+
+    #[test]
+    fn does_not_strip_underscore_in_identifier() {
+        // `_internal` is part of a column name, not a charset prefix —
+        // there's no quote after it. Should pass through.
+        let predicate = "(`row_internal_state` >= 0)";
+        assert_eq!(normalize_mysql_check_clause(predicate), predicate);
+    }
+
+    #[test]
+    fn converts_backslash_escape_only() {
+        // No charset prefix, but backslash-escaped quote: un-escape to
+        // plain quote (the original delimiter).
+        assert_eq!(normalize_mysql_check_clause("`x` = \\'a\\'"), "`x` = 'a'");
+    }
 }

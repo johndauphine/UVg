@@ -123,6 +123,10 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
             "NVARCHAR(255)",
             "No ENUM type in MSSQL; consider CHECK constraint",
         ),
+        CanonicalType::Set { values } => DdlType::approx(
+            &format!("NVARCHAR({})", super::pg::set_varchar_capacity(values)),
+            "MySQL SET mapped to NVARCHAR; multi-value semantic lost",
+        ),
         CanonicalType::Array { .. } => DdlType::approx(
             "NVARCHAR(MAX)",
             "No array type in MSSQL; using NVARCHAR(MAX)",
