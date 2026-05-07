@@ -113,6 +113,16 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
                 "Enum mapped to VARCHAR; use CREATE TYPE for native PG enum",
             )
         }
+        CanonicalType::Set { values } => {
+            // PG has no SET type. Fall back to VARCHAR sized to fit the
+            // comma-joined value list (worst case: every value present at
+            // once). Loses the value-set semantic but at least lets the
+            // column accept anything the source could produce. See #38.
+            DdlType::approx(
+                &format!("VARCHAR({})", set_varchar_capacity(values)),
+                "MySQL SET mapped to VARCHAR; multi-value semantic lost",
+            )
+        }
         CanonicalType::Array { element } => {
             let inner = from_canonical(element);
             let mut ddl = DdlType::exact(&format!("{}[]", inner.sql_type));
@@ -124,6 +134,22 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         }
         CanonicalType::Raw { type_name } => DdlType::exact(type_name),
     }
+}
+
+/// Compute a VARCHAR width sized to fit any concatenation of MySQL SET
+/// values: sum of all value lengths plus a comma between each pair.
+/// Conservative — accommodates the worst-case "all values selected" row.
+/// Used by the PG/MSSQL/SQLite fallback for SET, which has no native form.
+pub(super) fn set_varchar_capacity(values: &[String]) -> usize {
+    if values.is_empty() {
+        return 1;
+    }
+    let total_chars: usize = values.iter().map(|v| v.chars().count()).sum();
+    let separators = values.len().saturating_sub(1);
+    let computed = total_chars + separators;
+    // Floor at 255 — uvg's existing Enum fallback uses VARCHAR(255), and
+    // small sizes look surprising in DDL even when literally correct.
+    computed.max(255)
 }
 
 #[cfg(test)]
@@ -190,6 +216,36 @@ mod tests {
         assert_eq!(ct, CanonicalType::Jsonb);
         let dt = from_canonical(&ct);
         assert_eq!(dt.sql_type, "JSONB");
+    }
+
+    #[test]
+    fn test_pg_set_fallback() {
+        // #38 — MySQL SET has no PG equivalent. Falls back to VARCHAR sized
+        // to fit the worst-case comma-joined value list (with a 255 floor).
+        let ct = CanonicalType::Set {
+            values: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let dt = from_canonical(&ct);
+        assert!(dt.sql_type.starts_with("VARCHAR("), "got {}", dt.sql_type);
+        assert!(dt.is_approximate);
+        assert!(dt.warning.as_deref().unwrap().contains("multi-value"));
+    }
+
+    #[test]
+    fn test_set_varchar_capacity() {
+        use super::set_varchar_capacity;
+        // 4 values × 6 chars + 3 separators = 27 — but the 255 floor wins.
+        let v: Vec<String> = ["billing", "shipping", "mailing", "phys24"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(set_varchar_capacity(&v), 255);
+        // Edge case: empty list returns 1 (defensive — shouldn't happen
+        // since SET requires at least one value).
+        assert_eq!(set_varchar_capacity(&[]), 1);
+        // Above the 255 floor: long values force a larger column.
+        let big = vec!["x".repeat(300)];
+        assert_eq!(set_varchar_capacity(&big), 300);
     }
 
     #[test]

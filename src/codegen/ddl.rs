@@ -68,12 +68,12 @@ impl DdlGenerator {
             table_stmts.push(create);
 
             if !options.noindexes {
-                let indexes = generate_indexes(table, target_dialect);
+                let indexes = generate_indexes(table, source_dialect, target_dialect);
                 table_stmts.extend(indexes);
             }
 
             if !options.nocomments {
-                let comments = generate_comments(table, target_dialect);
+                let comments = generate_comments(table, source_dialect, target_dialect);
                 table_stmts.extend(comments);
             }
 
@@ -143,7 +143,7 @@ pub(super) fn generate_create_table(
     target_dialect: Dialect,
     options: &DdlOptions,
 ) -> String {
-    let qname = qualified_table_name(&table.schema, &table.name, target_dialect);
+    let qname = qualified_table_name(&table.schema, &table.name, source_dialect, target_dialect);
     let mut parts: Vec<String> = Vec::new();
     // Comments for CHECK constraints we dropped because their predicate
     // wasn't portable — kept separate from `parts` so they don't end up
@@ -179,11 +179,27 @@ pub(super) fn generate_create_table(
                         .iter()
                         .map(|col| quote_identifier(col, target_dialect))
                         .collect();
-                    parts.push(format!(
-                        "    CONSTRAINT {} PRIMARY KEY ({})",
-                        quote_identifier(&c.name, target_dialect),
-                        cols.join(", ")
-                    ));
+                    // MySQL stores the PK constraint name as the literal
+                    // sentinel "PRIMARY" — that's a magic identifier in
+                    // information_schema. Emitting `CONSTRAINT "PRIMARY"`
+                    // on PG / MSSQL fails: PG reserves that name as the
+                    // underlying index identifier and the second table
+                    // hits "relation PRIMARY already exists". Drop the
+                    // constraint name when it's the MySQL sentinel and
+                    // we're targeting non-mysql; the engine will assign
+                    // a sensible default (e.g. PG `<table>_pkey`).
+                    let drop_pk_name = c.name == "PRIMARY"
+                        && source_dialect == Dialect::Mysql
+                        && target_dialect != Dialect::Mysql;
+                    if drop_pk_name {
+                        parts.push(format!("    PRIMARY KEY ({})", cols.join(", ")));
+                    } else {
+                        parts.push(format!(
+                            "    CONSTRAINT {} PRIMARY KEY ({})",
+                            quote_identifier(&c.name, target_dialect),
+                            cols.join(", ")
+                        ));
+                    }
                 }
             }
         }
@@ -213,8 +229,12 @@ pub(super) fn generate_create_table(
                         .iter()
                         .map(|col| quote_identifier(col, target_dialect))
                         .collect();
-                    let ref_table =
-                        qualified_table_name(&fk.ref_schema, &fk.ref_table, target_dialect);
+                    let ref_table = qualified_table_name(
+                        &fk.ref_schema,
+                        &fk.ref_table,
+                        source_dialect,
+                        target_dialect,
+                    );
                     let ref_cols: Vec<String> = fk
                         .ref_columns
                         .iter()
@@ -628,9 +648,31 @@ fn check_predicate_is_portable(expr: &str, source: Dialect, target: Dialect) -> 
             return false;
         }
     }
-    // MySQL CHECKs are usually portable (basic comparisons, IN, IS NULL),
-    // but MySQL-specific function names like `IF()` are out of scope. We
-    // don't currently flag those — falls back to apply-time error if hit.
+    if source == Dialect::Mysql {
+        let lower = expr.to_lowercase();
+        // MySQL TINYINT(1) round-trips to a real BOOLEAN on PG/MSSQL.
+        // The source's typical boolean-range CHECK is `<col> in (0,1)` —
+        // a literal int comparison. PG rejects with "operator does not
+        // exist: boolean = integer"; the check is also redundant on a
+        // target where the column type IS BOOLEAN (the constraint is
+        // implicit). Drop these on cross-dialect mysql→{pg,mssql,sqlite}.
+        // Match common shapes (with or without spaces).
+        if lower.contains(" in (0,1)")
+            || lower.contains(" in (0, 1)")
+            || lower.contains(" in (1,0)")
+            || lower.contains(" in (1, 0)")
+        {
+            return false;
+        }
+        // regexp_like() is a MySQL function; MSSQL has no built-in regex
+        // and PG uses the `~` operator instead. Drop these CHECK predicates
+        // when crossing dialects rather than emit DDL that fails at apply.
+        if lower.contains("regexp_like(") {
+            return false;
+        }
+    }
+    // MySQL-specific function names like `IF()` are still passed through —
+    // those would fail at apply time. Adding more patterns is incremental.
     true
 }
 
@@ -798,12 +840,17 @@ fn strip_precision_suffix(lower: &str) -> String {
 
 /// Generate a qualified table name with schema prefix if non-default.
 /// Maps source default schemas to target default schemas (e.g. PG "public" → MSSQL "dbo").
-pub(super) fn qualified_table_name(schema: &str, table: &str, dialect: Dialect) -> String {
-    let default_schema = dialect.default_schema();
+pub(super) fn qualified_table_name(
+    schema: &str,
+    table: &str,
+    source_dialect: Dialect,
+    target_dialect: Dialect,
+) -> String {
+    let default_schema = target_dialect.default_schema();
 
     // Suppress schema if it matches the target's default
     if schema.is_empty() || schema == default_schema {
-        return quote_identifier(table, dialect);
+        return quote_identifier(table, target_dialect);
     }
 
     // Map other dialects' default schemas to the target's default.
@@ -813,23 +860,36 @@ pub(super) fn qualified_table_name(schema: &str, table: &str, dialect: Dialect) 
 
     // For MySQL targets, the schema IS the database name — always suppress it
     // since the target connection already specifies the database.
-    let suppress_for_mysql_target = dialect == Dialect::Mysql;
+    let suppress_for_mysql_target = target_dialect == Dialect::Mysql;
 
-    if is_source_default_schema || suppress_for_mysql_target {
-        return quote_identifier(table, dialect);
+    // For MySQL SOURCE on a non-MySQL target, the source's "schema" is also
+    // the database name (MySQL conflates the two). The user's target DB
+    // doesn't have a same-named PG/MSSQL schema, and qualifying tables with
+    // it produces `ERROR: schema "crm_mysql" does not exist`. Drop the
+    // qualification cross-dialect from MySQL. Same-dialect (mysql→mysql)
+    // preserves it via the `target_dialect == Mysql` branch above. See #40.
+    let suppress_for_mysql_source =
+        source_dialect == Dialect::Mysql && target_dialect != Dialect::Mysql;
+
+    if is_source_default_schema || suppress_for_mysql_target || suppress_for_mysql_source {
+        return quote_identifier(table, target_dialect);
     }
 
     format!(
         "{}.{}",
-        quote_identifier(schema, dialect),
-        quote_identifier(table, dialect)
+        quote_identifier(schema, target_dialect),
+        quote_identifier(table, target_dialect)
     )
 }
 
 /// Generate CREATE INDEX statements for a table.
-pub(super) fn generate_indexes(table: &TableInfo, target_dialect: Dialect) -> Vec<String> {
+pub(super) fn generate_indexes(
+    table: &TableInfo,
+    source_dialect: Dialect,
+    target_dialect: Dialect,
+) -> Vec<String> {
     let mut stmts = Vec::new();
-    let tname = qualified_table_name(&table.schema, &table.name, target_dialect);
+    let tname = qualified_table_name(&table.schema, &table.name, source_dialect, target_dialect);
 
     for idx in &table.indexes {
         if is_unique_constraint_index(idx, &table.constraints) {
@@ -853,14 +913,18 @@ pub(super) fn generate_indexes(table: &TableInfo, target_dialect: Dialect) -> Ve
 }
 
 /// Generate COMMENT ON statements (PG only; MySQL is inline).
-fn generate_comments(table: &TableInfo, target_dialect: Dialect) -> Vec<String> {
+fn generate_comments(
+    table: &TableInfo,
+    source_dialect: Dialect,
+    target_dialect: Dialect,
+) -> Vec<String> {
     // Only PG uses separate COMMENT ON statements
     if target_dialect != Dialect::Postgres {
         return vec![];
     }
 
     let mut stmts = Vec::new();
-    let tname = qualified_table_name(&table.schema, &table.name, target_dialect);
+    let tname = qualified_table_name(&table.schema, &table.name, source_dialect, target_dialect);
 
     if let Some(ref comment) = table.comment {
         stmts.push(format!(
@@ -990,6 +1054,29 @@ mod tests {
     }
 
     #[test]
+    fn test_qualified_table_name_mysql_source_dropped_cross_dialect() {
+        // #40 — MySQL source's "schema" is the database name. When emitting
+        // for a non-MySQL target, that schema doesn't exist there; drop it.
+        // Same-dialect (mysql→mysql) preserves it via the existing rules.
+        let result = qualified_table_name("crm_mysql", "users", Dialect::Mysql, Dialect::Postgres);
+        assert_eq!(result, "\"users\"");
+
+        let result = qualified_table_name("crm_mysql", "users", Dialect::Mysql, Dialect::Mssql);
+        assert_eq!(result, "[users]");
+
+        // Same-dialect: behavior unchanged. (mysql → mysql actually goes
+        // through the suppress_for_mysql_target branch and drops anyway,
+        // since the target connection already specifies the database.)
+        let result = qualified_table_name("crm_mysql", "users", Dialect::Mysql, Dialect::Mysql);
+        assert_eq!(result, "`users`");
+
+        // Negative: PG source with a real (non-default) schema must keep
+        // the qualification — only mysql sources are special.
+        let result = qualified_table_name("warehouse", "orders", Dialect::Postgres, Dialect::Mssql);
+        assert_eq!(result, "[warehouse].[orders]");
+    }
+
+    #[test]
     fn test_translate_default_now() {
         assert_eq!(
             translate_default_function("now()", Dialect::Mysql),
@@ -1100,6 +1187,25 @@ mod tests {
             r"(email ~ '^[^@]+@[^@]+\.[^@]+$')",
             Dialect::Postgres,
             Dialect::Postgres
+        ));
+
+        // mysql `<col> in (0,1)` boolean-range CHECK is non-portable to
+        // PG (BOOLEAN ≠ integer) and redundant elsewhere — flagged.
+        assert!(!check_predicate_is_portable(
+            "(`is_active` in (0,1))",
+            Dialect::Mysql,
+            Dialect::Postgres
+        ));
+        assert!(!check_predicate_is_portable(
+            "(`x` in (1, 0))",
+            Dialect::Mysql,
+            Dialect::Mssql
+        ));
+        // Same-dialect mysql→mysql preserves it.
+        assert!(check_predicate_is_portable(
+            "(`is_active` in (0,1))",
+            Dialect::Mysql,
+            Dialect::Mysql
         ));
     }
 

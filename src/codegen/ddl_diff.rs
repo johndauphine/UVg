@@ -36,7 +36,10 @@ pub fn diff_schemas(
         .iter()
         .map(|t| {
             (
-                (normalize_schema(&t.schema, &mysql_defaults), t.name.as_str()),
+                (
+                    normalize_schema(&t.schema, &mysql_defaults),
+                    t.name.as_str(),
+                ),
                 t,
             )
         })
@@ -46,7 +49,10 @@ pub fn diff_schemas(
         .iter()
         .map(|t| {
             (
-                (normalize_schema(&t.schema, &mysql_defaults), t.name.as_str()),
+                (
+                    normalize_schema(&t.schema, &mysql_defaults),
+                    t.name.as_str(),
+                ),
                 t,
             )
         })
@@ -72,7 +78,7 @@ pub fn diff_schemas(
                 options,
             ));
             if !options.noindexes {
-                stmts.extend(generate_indexes(table, target_dialect));
+                stmts.extend(generate_indexes(table, source_dialect, target_dialect));
             }
         }
     }
@@ -87,8 +93,7 @@ pub fn diff_schemas(
             table.name.as_str(),
         );
         if let Some(target_table) = target_map.get(&key) {
-            let alters =
-                diff_table_columns(table, target_table, source_dialect, target_dialect);
+            let alters = diff_table_columns(table, target_table, source_dialect, target_dialect);
             stmts.extend(alters);
         }
     }
@@ -101,7 +106,11 @@ pub fn diff_schemas(
         .collect();
     dropped.sort();
     for (schema, name) in dropped {
-        let qname = qualified_table_name(schema, name, target_dialect);
+        // Dropped tables come from the target's introspection — the schema
+        // here is already in the target's namespace, so source_dialect is
+        // immaterial for the qualification rule. Pass target_dialect for
+        // both sides to mean "no source-specific suppression."
+        let qname = qualified_table_name(schema, name, target_dialect, target_dialect);
         stmts.push(format!(
             "-- WARNING: destructive operation\nDROP TABLE IF EXISTS {qname};"
         ));
@@ -161,17 +170,24 @@ fn diff_table_columns(
     target_dialect: Dialect,
 ) -> Vec<String> {
     let mut stmts = Vec::new();
-    let tname = qualified_table_name(&source.schema, &source.name, target_dialect);
+    let tname = qualified_table_name(&source.schema, &source.name, source_dialect, target_dialect);
 
-    let source_cols: HashMap<&str, &ColumnInfo> =
-        source.columns.iter().map(|c| (c.name.as_str(), c)).collect();
-    let target_cols: HashMap<&str, &ColumnInfo> =
-        target.columns.iter().map(|c| (c.name.as_str(), c)).collect();
+    let source_cols: HashMap<&str, &ColumnInfo> = source
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+    let target_cols: HashMap<&str, &ColumnInfo> = target
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
 
     // New columns
     for col in &source.columns {
         if !target_cols.contains_key(col.name.as_str()) {
-            let col_def = generate_column_def(col, &source.constraints, source_dialect, target_dialect);
+            let col_def =
+                generate_column_def(col, &source.constraints, source_dialect, target_dialect);
             let col_def = col_def.trim();
             let add_clause = match target_dialect {
                 Dialect::Mssql => "ADD",
@@ -224,7 +240,7 @@ fn diff_column(
     target_dialect: Dialect,
 ) -> Vec<String> {
     let mut stmts = Vec::new();
-    let tname = qualified_table_name(table_schema, table_name, target_dialect);
+    let tname = qualified_table_name(table_schema, table_name, source_dialect, target_dialect);
     let cname = quote_identifier(&source.name, target_dialect);
 
     let source_type = ddl_typemap::map_ddl_type(source, source_dialect, target_dialect);
@@ -305,7 +321,11 @@ fn diff_column(
         }
         Dialect::Mssql => {
             if type_changed || nullable_changed {
-                let not_null = if !source.is_nullable { " NOT NULL" } else { " NULL" };
+                let not_null = if !source.is_nullable {
+                    " NOT NULL"
+                } else {
+                    " NULL"
+                };
                 stmts.push(format!(
                     "ALTER TABLE {tname} ALTER COLUMN {cname} {}{not_null};",
                     source_type.sql_type
@@ -318,9 +338,7 @@ fn diff_column(
                     col_name = source.name
                 ));
                 if let Some(ref d) = source_default {
-                    stmts.push(format!(
-                        "ALTER TABLE {tname} ADD DEFAULT {d} FOR {cname};"
-                    ));
+                    stmts.push(format!("ALTER TABLE {tname} ADD DEFAULT {d} FOR {cname};"));
                 }
             }
         }
@@ -354,9 +372,10 @@ mod tests {
 
     #[test]
     fn test_diff_new_table() {
-        let source = schema_pg(vec![
-            table("users").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
+        let source = schema_pg(vec![table("users")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
         let target = schema_pg(vec![]);
         let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
         assert!(ddl.contains("CREATE TABLE \"users\""));
@@ -365,9 +384,10 @@ mod tests {
     #[test]
     fn test_diff_dropped_table() {
         let source = schema_pg(vec![]);
-        let target = schema_pg(vec![
-            table("old").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
+        let target = schema_pg(vec![table("old")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
         let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
         assert!(ddl.contains("DROP TABLE IF EXISTS"));
         assert!(ddl.contains("WARNING: destructive"));
@@ -375,39 +395,45 @@ mod tests {
 
     #[test]
     fn test_diff_new_column() {
-        let source = schema_pg(vec![
-            table("users")
-                .column(col("id").build())
-                .column(col("email").udt("varchar").max_length(255).build())
-                .pk("pk", &["id"])
-                .build(),
-        ]);
-        let target = schema_pg(vec![
-            table("users").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
+        let source = schema_pg(vec![table("users")
+            .column(col("id").build())
+            .column(col("email").udt("varchar").max_length(255).build())
+            .pk("pk", &["id"])
+            .build()]);
+        let target = schema_pg(vec![table("users")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
         let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
         assert!(ddl.contains("ADD COLUMN \"email\" VARCHAR(255) NOT NULL"));
     }
 
     #[test]
     fn test_diff_no_changes() {
-        let schema = schema_pg(vec![
-            table("users").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
+        let schema = schema_pg(vec![table("users")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
         let ddl = diff_schemas(&schema, &schema, &default_options(Dialect::Postgres));
         assert!(ddl.contains("No schema changes detected"));
     }
 
     #[test]
     fn test_diff_cross_dialect_default_schemas_match() {
-        let source = schema_pg(vec![
-            table("users").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
-        let target = schema_pg(vec![
-            table("users").schema("dbo").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
+        let source = schema_pg(vec![table("users")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
+        let target = schema_pg(vec![table("users")
+            .schema("dbo")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
         let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
-        assert!(ddl.contains("No schema changes detected"), "public should match dbo: {ddl}");
+        assert!(
+            ddl.contains("No schema changes detected"),
+            "public should match dbo: {ddl}"
+        );
     }
 
     #[test]
@@ -467,12 +493,16 @@ mod tests {
 
     #[test]
     fn test_diff_multi_schema_preserved() {
-        let source = schema_pg(vec![
-            table("users").schema("schema_a").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
-        let target = schema_pg(vec![
-            table("users").schema("schema_b").column(col("id").build()).pk("pk", &["id"]).build(),
-        ]);
+        let source = schema_pg(vec![table("users")
+            .schema("schema_a")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
+        let target = schema_pg(vec![table("users")
+            .schema("schema_b")
+            .column(col("id").build())
+            .pk("pk", &["id"])
+            .build()]);
         let ddl = diff_schemas(&source, &target, &default_options(Dialect::Postgres));
         assert!(
             ddl.contains("CREATE TABLE") && ddl.contains("DROP TABLE"),

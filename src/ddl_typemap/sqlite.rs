@@ -93,6 +93,9 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         CanonicalType::Enum { .. } => {
             DdlType::approx("TEXT", "No ENUM type in SQLite; consider CHECK constraint")
         }
+        CanonicalType::Set { .. } => {
+            DdlType::approx("TEXT", "No SET type in SQLite; multi-value semantic lost")
+        }
         CanonicalType::Array { .. } => {
             DdlType::approx("TEXT", "No array type in SQLite; using TEXT (JSON)")
         }

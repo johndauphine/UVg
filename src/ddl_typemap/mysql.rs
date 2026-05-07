@@ -116,9 +116,14 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
             let values = parse_values(&col.data_type);
             CanonicalType::Enum { values }
         }
-        "set" => CanonicalType::Raw {
-            type_name: col.data_type.to_uppercase(),
-        },
+        "set" => {
+            // SET shares parse_values with ENUM — both store comma-separated
+            // single-quoted literals inside the type's parens. First-class
+            // CanonicalType::Set lets non-mysql targets emit a sized VARCHAR
+            // fallback (#38) instead of leaking the verbatim `SET(...)` text.
+            let values = parse_values(&col.data_type);
+            CanonicalType::Set { values }
+        }
         "bit" => {
             // BIT(1) is boolean; BIT(n) preserves width
             if col.numeric_precision.unwrap_or(1) == 1 {
@@ -187,6 +192,13 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
                 .collect();
             DdlType::exact(&format!("ENUM({})", quoted.join(", ")))
         }
+        CanonicalType::Set { values } => {
+            let quoted: Vec<String> = values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect();
+            DdlType::exact(&format!("SET({})", quoted.join(", ")))
+        }
         CanonicalType::Array { .. } => {
             DdlType::approx("JSON", "No array type in MySQL; using JSON")
         }
@@ -243,6 +255,23 @@ mod tests {
     fn test_jsonb_to_mysql() {
         let dt = from_canonical(&CanonicalType::Jsonb);
         assert_eq!(dt.sql_type, "JSON");
+    }
+
+    #[test]
+    fn test_mysql_set_roundtrip() {
+        // #38 — MySQL SET column → CanonicalType::Set with parsed values,
+        // re-emits to native SET('a','b','c') on a mysql target.
+        let c = mysql_col("set", "set('billing','shipping','physical','mailing')");
+        let ct = to_canonical(&c);
+        assert!(matches!(
+            ct,
+            CanonicalType::Set { ref values }
+                if values == &["billing", "shipping", "physical", "mailing"]
+        ));
+        assert_eq!(
+            from_canonical(&ct).sql_type,
+            "SET('billing', 'shipping', 'physical', 'mailing')"
+        );
     }
 
     #[test]

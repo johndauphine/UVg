@@ -53,6 +53,13 @@ pub enum CanonicalType {
     Enum {
         values: Vec<String>,
     },
+    /// MySQL `SET('a','b','c')` — multi-value column. Native to MySQL only.
+    /// Other dialects fall back to a VARCHAR sized to fit the
+    /// comma-joined values; the SET semantic (zero or more values from
+    /// the list) is lost in the fallback. See #38.
+    Set {
+        values: Vec<String>,
+    },
     Array {
         element: Box<CanonicalType>,
     },
