@@ -145,6 +145,11 @@ pub(super) fn generate_create_table(
 ) -> String {
     let qname = qualified_table_name(&table.schema, &table.name, target_dialect);
     let mut parts: Vec<String> = Vec::new();
+    // Comments for CHECK constraints we dropped because their predicate
+    // wasn't portable — kept separate from `parts` so they don't end up
+    // on the comma-joined body (would produce trailing/double commas).
+    // Emitted after the CREATE TABLE statement closes.
+    let mut dropped_check_comments: Vec<String> = Vec::new();
 
     // Detect if any column has inline PK AUTOINCREMENT (SQLite)
     let has_inline_pk = target_dialect == Dialect::Sqlite
@@ -246,14 +251,20 @@ pub(super) fn generate_create_table(
         // emitting them would fail at apply time and abort the table.
         // Same-dialect runs always emit verbatim. The dropped predicate is
         // surfaced as a `-- ` comment so the user can hand-translate.
+        //
+        // Dropped-check comments go in a parallel vec rather than into
+        // `parts`: `parts.join(",\n")` below would leave a trailing comma
+        // before `)` if a `-- DROPPED ...` line were the last entry, or
+        // produce two commas in a row mid-body. Comments don't get joined
+        // with a comma — they're appended after the body close.
         for c in &table.constraints {
             if c.constraint_type == ConstraintType::Check {
                 if let Some(ref expr) = c.check_expression {
                     if source_dialect != target_dialect
                         && !check_predicate_is_portable(expr, source_dialect, target_dialect)
                     {
-                        parts.push(format!(
-                            "    -- DROPPED CHECK {}: predicate uses non-portable syntax\n    --   source: {}",
+                        dropped_check_comments.push(format!(
+                            "-- DROPPED CHECK {}: predicate uses non-portable syntax\n--   source: {}",
                             c.name,
                             expr.replace('\n', " ")
                         ));
@@ -284,7 +295,18 @@ pub(super) fn generate_create_table(
         String::new()
     };
 
-    format!("CREATE TABLE {qname} (\n{body}\n){table_comment};")
+    let mut output = format!("CREATE TABLE {qname} (\n{body}\n){table_comment};");
+    if !dropped_check_comments.is_empty() {
+        // Emit dropped-check comments after the CREATE TABLE — they're not
+        // part of the statement body, just human-readable notes about
+        // constraints uvg couldn't translate.
+        output.push('\n');
+        for comment in &dropped_check_comments {
+            output.push_str(comment);
+            output.push('\n');
+        }
+    }
+    output
 }
 
 /// Generate a column definition line.
@@ -581,8 +603,13 @@ fn translate_default_function(expr: &str, target: Dialect) -> String {
 ///
 /// Currently flags:
 ///   - PG `~` / `~*` regex operators (no MSSQL/MySQL equivalent)
-///   - PG `ARRAY[...]` literals when target=MSSQL (MSSQL has no array type)
-///   - PG `ANY(ARRAY[...])` quantified expressions (target≠PG)
+///   - PG `ARRAY[...]` literals (no non-PG dialect has array literal syntax)
+///   - PG `ANY(ARRAY[...])` / `ALL(ARRAY[...])` quantified expressions
+///
+/// All flags fire for any non-PG target — none of MSSQL/MySQL/SQLite have
+/// equivalents for these PG-specific constructs. (Earlier doc said "when
+/// target=MSSQL" for the array case; the implementation has always been
+/// broader than that.)
 ///
 /// Heuristic by token search; misclassifies if a string literal happens to
 /// contain `~` or `ARRAY[`, but that's rare in CHECK predicates.
@@ -640,15 +667,27 @@ fn translate_mssql_check_predicate(expr: &str) -> String {
 
 /// Strip PG `::type` and `::type(N)` cast suffixes from a predicate. PG's
 /// pg_get_constraintdef emits explicit casts like `(code)::text = upper(...)`
-/// or `id::int4 > 0`. Other dialects' parsers reject `::`. We strip the
-/// cast token by token: scan for `::`, then consume an identifier and an
-/// optional parenthesized arg list. Anything else passes through.
+/// or `id::int4 > 0`. Other dialects' parsers reject `::`. We scan for
+/// `::`, then consume an identifier and an optional parenthesized arg
+/// list. Everything else passes through unchanged.
+///
+/// Implementation note: copy non-cast spans as UTF-8 string slices via
+/// `push_str(&expr[last..i])` rather than byte-by-byte. The cast tokens
+/// themselves are pure ASCII (`::`, identifier, parens, digits) so byte-
+/// level scanning of the cast region is safe; only the surrounding text
+/// might contain non-ASCII (accented string literals in CHECK predicates),
+/// which the slice-copy approach preserves intact.
 fn strip_pg_casts_in_predicate(expr: &str) -> String {
     let bytes = expr.as_bytes();
     let mut out = String::with_capacity(expr.len());
     let mut i = 0;
+    let mut last_copied = 0;
     while i < bytes.len() {
         if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':' {
+            // Flush the run of bytes since the previous skip — slice copy
+            // preserves any non-ASCII content (accented string literals,
+            // etc.) intact.
+            out.push_str(&expr[last_copied..i]);
             // Skip "::"
             i += 2;
             // Skip the type identifier — alphanumeric and underscore only.
@@ -673,11 +712,14 @@ fn strip_pg_casts_in_predicate(expr: &str) -> String {
                     i += 1;
                 }
             }
+            last_copied = i;
         } else {
-            out.push(bytes[i] as char);
             i += 1;
         }
     }
+    // Tail flush — copy whatever's after the last cast (or the entire
+    // input if no cast was found).
+    out.push_str(&expr[last_copied..]);
     out
 }
 
@@ -706,11 +748,15 @@ fn reattach_now_family_precision(default: &str, precision: u8) -> String {
     if trimmed.ends_with(')') && !trimmed.ends_with("()") {
         return default.to_string();
     }
-    // Recognize the now-family keywords (case-insensitive).
+    // Recognize the now-family keywords that ACCEPT a fractional-seconds
+    // precision argument (per MySQL grammar). CURRENT_DATE explicitly does
+    // NOT — `CURRENT_DATE(6)` is a parser error in MySQL — so it's omitted
+    // here. The set is: CURRENT_TIMESTAMP, CURRENT_TIME, LOCALTIME,
+    // LOCALTIMESTAMP, NOW (and the function variants handled below).
     let lower = trimmed.to_lowercase();
     let is_now_keyword = matches!(
         lower.as_str(),
-        "current_timestamp" | "current_date" | "current_time" | "localtimestamp" | "localtime"
+        "current_timestamp" | "current_time" | "localtimestamp" | "localtime"
     );
     let is_now_func_no_args = lower.ends_with("()")
         && (lower.starts_with("now")
@@ -1131,6 +1177,14 @@ mod tests {
         // Non-now-family: passes through (no inappropriate precision append).
         assert_eq!(reattach_now_family_precision("'pending'", 6), "'pending'");
         assert_eq!(reattach_now_family_precision("42", 6), "42");
+        // CURRENT_DATE does NOT accept FSP in MySQL — it's a date-only
+        // function, no fractional-seconds component. We must NOT append
+        // precision, even though it's a "now"-family keyword textually.
+        // Per Copilot review on PR #37.
+        assert_eq!(
+            reattach_now_family_precision("CURRENT_DATE", 6),
+            "CURRENT_DATE"
+        );
     }
 
     #[test]
