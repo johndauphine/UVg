@@ -55,6 +55,26 @@ fn parse_values(column_type: &str) -> Vec<String> {
     values
 }
 
+/// Parse the sub-second precision from a MySQL temporal column type string.
+/// `column_type` is the full COLUMN_TYPE field — e.g. `datetime(6)`,
+/// `timestamp(3)`, `time`. Returns `Some(N)` for `(N)` where N is 0-6,
+/// `None` for "no precision specified" (which MySQL stores as 0 implicitly,
+/// but we preserve the round-trip distinction). See #36.
+fn parse_temporal_precision(column_type: &str) -> Option<u8> {
+    let start = column_type.find('(')?;
+    let end = column_type.rfind(')')?;
+    if start >= end {
+        return None;
+    }
+    let inside = column_type[start + 1..end].trim();
+    let n = inside.parse::<u8>().ok()?;
+    if n <= 6 {
+        Some(n)
+    } else {
+        None
+    }
+}
+
 /// Normalize a MySQL column type to canonical form.
 pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
     let udt = col.udt_name.as_str();
@@ -82,9 +102,14 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
         },
         "blob" | "tinyblob" | "mediumblob" | "longblob" => CanonicalType::Bytes { length: None },
         "date" => CanonicalType::Date,
-        "time" => CanonicalType::Time { with_tz: false },
-        "datetime" => CanonicalType::Timestamp { with_tz: false },
-        "timestamp" => CanonicalType::Timestamp { with_tz: false },
+        "time" => CanonicalType::Time {
+            with_tz: false,
+            precision: parse_temporal_precision(&col.data_type),
+        },
+        "datetime" | "timestamp" => CanonicalType::Timestamp {
+            with_tz: false,
+            precision: parse_temporal_precision(&col.data_type),
+        },
         "year" => CanonicalType::SmallInt,
         "json" => CanonicalType::Json,
         "enum" => {
@@ -137,14 +162,24 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         CanonicalType::Bytes { length: Some(n) } => DdlType::exact(&format!("VARBINARY({n})")),
         CanonicalType::Bytes { length: None } => DdlType::exact("BLOB"),
         CanonicalType::Date => DdlType::exact("DATE"),
-        CanonicalType::Time { .. } => DdlType::exact("TIME"),
-        CanonicalType::Timestamp { .. } => DdlType::exact("DATETIME"),
-        CanonicalType::Interval => {
-            DdlType::approx("VARCHAR(255)", "No INTERVAL type in MySQL")
-        }
+        CanonicalType::Time {
+            precision: Some(p), ..
+        } => DdlType::exact(&format!("TIME({p})")),
+        CanonicalType::Time {
+            precision: None, ..
+        } => DdlType::exact("TIME"),
+        CanonicalType::Timestamp {
+            precision: Some(p), ..
+        } => DdlType::exact(&format!("DATETIME({p})")),
+        CanonicalType::Timestamp {
+            precision: None, ..
+        } => DdlType::exact("DATETIME"),
+        CanonicalType::Interval => DdlType::approx("VARCHAR(255)", "No INTERVAL type in MySQL"),
         CanonicalType::Uuid => DdlType::exact("CHAR(36)"),
         CanonicalType::Json => DdlType::exact("JSON"),
-        CanonicalType::Jsonb => DdlType::approx("JSON", "JSONB binary indexing not available in MySQL"),
+        CanonicalType::Jsonb => {
+            DdlType::approx("JSON", "JSONB binary indexing not available in MySQL")
+        }
         CanonicalType::Enum { values } => {
             let quoted: Vec<String> = values
                 .iter()
@@ -208,6 +243,48 @@ mod tests {
     fn test_jsonb_to_mysql() {
         let dt = from_canonical(&CanonicalType::Jsonb);
         assert_eq!(dt.sql_type, "JSON");
+    }
+
+    #[test]
+    fn test_datetime_precision_roundtrip() {
+        // #36 — DATETIME(6) source must round-trip with precision intact.
+        // Without this, the source's `DEFAULT CURRENT_TIMESTAMP(6)` would
+        // hit a plain `DATETIME` column on the target — MySQL rejects the
+        // mismatch with "Invalid default value".
+        let c = mysql_col("datetime", "datetime(6)");
+        let ct = to_canonical(&c);
+        assert_eq!(
+            ct,
+            CanonicalType::Timestamp {
+                with_tz: false,
+                precision: Some(6)
+            }
+        );
+        let dt = from_canonical(&ct);
+        assert_eq!(dt.sql_type, "DATETIME(6)");
+
+        // Plain `datetime` (no precision) round-trips as bare DATETIME.
+        let c2 = mysql_col("datetime", "datetime");
+        assert_eq!(
+            to_canonical(&c2),
+            CanonicalType::Timestamp {
+                with_tz: false,
+                precision: None
+            }
+        );
+        assert_eq!(from_canonical(&to_canonical(&c2)).sql_type, "DATETIME");
+    }
+
+    #[test]
+    fn test_parse_temporal_precision() {
+        assert_eq!(parse_temporal_precision("datetime(6)"), Some(6));
+        assert_eq!(parse_temporal_precision("timestamp(3)"), Some(3));
+        assert_eq!(parse_temporal_precision("time(0)"), Some(0));
+        assert_eq!(parse_temporal_precision("datetime"), None);
+        // Out-of-range precisions (>6) are rejected as None — defensive.
+        assert_eq!(parse_temporal_precision("datetime(9)"), None);
+        // Non-numeric junk inside parens — None.
+        assert_eq!(parse_temporal_precision("varchar(N)"), None);
     }
 
     #[test]

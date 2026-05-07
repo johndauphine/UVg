@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
+use tiberius::Client;
 use tokio::net::TcpStream;
 use tokio_util::compat::Compat;
-use tiberius::Client;
 
 use crate::error::UvgError;
 use crate::schema::{ConstraintInfo, ConstraintType, ForeignKeyInfo};
@@ -42,10 +42,7 @@ pub async fn query_constraints(
             .unwrap_or("")
             .to_string();
         let ctype_str: &str = row.get::<&str, _>("CONSTRAINT_TYPE").unwrap_or("");
-        let col: String = row
-            .get::<&str, _>("COLUMN_NAME")
-            .unwrap_or("")
-            .to_string();
+        let col: String = row.get::<&str, _>("COLUMN_NAME").unwrap_or("").to_string();
 
         let ctype = match ctype_str {
             "PRIMARY KEY" => ConstraintType::PrimaryKey,
@@ -96,22 +93,10 @@ pub async fn query_constraints(
             .get::<&str, _>("constraint_name")
             .unwrap_or("")
             .to_string();
-        let col: String = row
-            .get::<&str, _>("column_name")
-            .unwrap_or("")
-            .to_string();
-        let ref_schema: String = row
-            .get::<&str, _>("ref_schema")
-            .unwrap_or("")
-            .to_string();
-        let ref_table: String = row
-            .get::<&str, _>("ref_table")
-            .unwrap_or("")
-            .to_string();
-        let ref_col: String = row
-            .get::<&str, _>("ref_column")
-            .unwrap_or("")
-            .to_string();
+        let col: String = row.get::<&str, _>("column_name").unwrap_or("").to_string();
+        let ref_schema: String = row.get::<&str, _>("ref_schema").unwrap_or("").to_string();
+        let ref_table: String = row.get::<&str, _>("ref_table").unwrap_or("").to_string();
+        let ref_col: String = row.get::<&str, _>("ref_column").unwrap_or("").to_string();
         // MSSQL uses underscores in action names: NO_ACTION -> NO ACTION
         let update_rule: String = row
             .get::<&str, _>("update_rule")
@@ -151,6 +136,43 @@ pub async fn query_constraints(
                 delete_rule: acc.delete_rule,
             }),
             check_expression: None,
+        });
+    }
+
+    // CHECK constraints via sys.check_constraints. The `definition` column
+    // carries the predicate text MSSQL stores after creation — typically
+    // wrapped in parens like `([is_active]=(1) OR [is_active]=(0))`. We
+    // pass it through verbatim; the codegen emitter wraps it in `CHECK (..)`.
+    // See #33.
+    let chk_query = r#"
+        SELECT
+            cc.name AS constraint_name,
+            cc.definition AS predicate
+        FROM sys.check_constraints cc
+        JOIN sys.tables t ON t.object_id = cc.parent_object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE s.name = @P1 AND t.name = @P2
+        ORDER BY cc.name
+    "#;
+
+    let stream = client.query(chk_query, &[&schema, &table_name]).await?;
+    let chk_rows = stream.into_first_result().await?;
+
+    for row in chk_rows {
+        let name: String = row
+            .get::<&str, _>("constraint_name")
+            .unwrap_or("")
+            .to_string();
+        let predicate: String = row.get::<&str, _>("predicate").unwrap_or("").to_string();
+        if name.is_empty() || predicate.is_empty() {
+            continue;
+        }
+        constraints.push(ConstraintInfo {
+            name,
+            constraint_type: ConstraintType::Check,
+            columns: vec![],
+            foreign_key: None,
+            check_expression: Some(predicate),
         });
     }
 

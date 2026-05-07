@@ -144,7 +144,59 @@ pub async fn query_constraints(
         });
     }
 
+    // CHECK constraints. pg_constraint.contype='c' is the catalog-side filter;
+    // pg_get_constraintdef returns a readable predicate string like
+    // `CHECK ((email ~ '^[^@]+@[^@]+\.[^@]+$'::text))`. Strip the outer
+    // `CHECK (...)` wrapping so the codegen emitter can wrap it the same way
+    // it does for mssql/mysql sources. See #33.
+    let chk_rows = sqlx::query_as::<_, ChkRow>(
+        r#"
+        SELECT c.conname AS constraint_name,
+               pg_get_constraintdef(c.oid) AS predicate
+        FROM pg_constraint c
+        JOIN pg_namespace n ON n.oid = c.connamespace
+        JOIN pg_class cl    ON cl.oid = c.conrelid
+        WHERE c.contype = 'c'
+          AND n.nspname = $1
+          AND cl.relname = $2
+        ORDER BY c.conname
+        "#,
+    )
+    .bind(schema)
+    .bind(table_name)
+    .fetch_all(pool)
+    .await?;
+
+    for row in chk_rows {
+        // pg_get_constraintdef returns "CHECK (...)" — strip the wrapper so
+        // emitter doesn't double-wrap. Also strip any leading "NOT VALID"
+        // suffix which constraint metadata can carry but isn't predicate.
+        let predicate = strip_check_wrapper(&row.predicate);
+        constraints.push(ConstraintInfo {
+            name: row.constraint_name,
+            constraint_type: ConstraintType::Check,
+            columns: vec![],
+            foreign_key: None,
+            check_expression: Some(predicate),
+        });
+    }
+
     Ok(constraints)
+}
+
+/// Strip the outer "CHECK (..)" envelope from a pg_get_constraintdef result.
+/// `CHECK ((x > 0))` → `(x > 0)` (kept inner parens — they're part of the
+/// expression). `CHECK (x > 0)` → `x > 0`. If the input doesn't start with
+/// `CHECK (`, return it unchanged — defensive against future format changes.
+fn strip_check_wrapper(def: &str) -> String {
+    let trimmed = def.trim();
+    let prefix = "CHECK (";
+    if let Some(stripped) = trimmed.strip_prefix(prefix) {
+        if let Some(stripped) = stripped.strip_suffix(')') {
+            return stripped.trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 struct FkAccumulator {
@@ -177,4 +229,27 @@ struct FkRow {
 struct UqRow {
     constraint_name: String,
     column_name: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ChkRow {
+    constraint_name: String,
+    predicate: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_check_wrapper;
+
+    #[test]
+    fn strips_check_wrapper() {
+        assert_eq!(strip_check_wrapper("CHECK (x > 0)"), "x > 0");
+        assert_eq!(strip_check_wrapper("CHECK ((x > 0))"), "(x > 0)");
+        assert_eq!(
+            strip_check_wrapper("  CHECK (a IS NOT NULL)  "),
+            "a IS NOT NULL"
+        );
+        // Defensive: unrecognized format returns input unchanged.
+        assert_eq!(strip_check_wrapper("(x > 0)"), "(x > 0)");
+    }
 }

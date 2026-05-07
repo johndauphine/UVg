@@ -32,9 +32,19 @@ pub enum CanonicalType {
     Date,
     Time {
         with_tz: bool,
+        /// Sub-second precision in digits (0–6). Currently meaningful only
+        /// on MySQL (TIME(N)). PG/MSSQL/SQLite ignore it on emission.
+        /// `None` means unspecified — emit without a precision suffix.
+        precision: Option<u8>,
     },
     Timestamp {
         with_tz: bool,
+        /// Sub-second precision in digits. Same semantics as Time.precision.
+        /// MySQL DATETIME(N) and TIMESTAMP(N) preserve this; other dialects
+        /// drop it on emission. Round-tripping mysql→mysql with a precision
+        /// default like `CURRENT_TIMESTAMP(6)` requires the column type to
+        /// carry the same N. See #36.
+        precision: Option<u8>,
     },
     Interval,
     Uuid,

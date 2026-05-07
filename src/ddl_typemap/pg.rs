@@ -36,12 +36,22 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
         "text" => CanonicalType::Text,
         "bytea" => CanonicalType::Bytes { length: None },
         "date" => CanonicalType::Date,
-        "time" | "time without time zone" => CanonicalType::Time { with_tz: false },
-        "timetz" | "time with time zone" => CanonicalType::Time { with_tz: true },
-        "timestamp" | "timestamp without time zone" => {
-            CanonicalType::Timestamp { with_tz: false }
-        }
-        "timestamptz" | "timestamp with time zone" => CanonicalType::Timestamp { with_tz: true },
+        "time" | "time without time zone" => CanonicalType::Time {
+            with_tz: false,
+            precision: None,
+        },
+        "timetz" | "time with time zone" => CanonicalType::Time {
+            with_tz: true,
+            precision: None,
+        },
+        "timestamp" | "timestamp without time zone" => CanonicalType::Timestamp {
+            with_tz: false,
+            precision: None,
+        },
+        "timestamptz" | "timestamp with time zone" => CanonicalType::Timestamp {
+            with_tz: true,
+            precision: None,
+        },
         "interval" => CanonicalType::Interval,
         "uuid" => CanonicalType::Uuid,
         "json" => CanonicalType::Json,
@@ -80,10 +90,15 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         CanonicalType::Text => DdlType::exact("TEXT"),
         CanonicalType::Bytes { .. } => DdlType::exact("BYTEA"),
         CanonicalType::Date => DdlType::exact("DATE"),
-        CanonicalType::Time { with_tz: false } => DdlType::exact("TIME"),
-        CanonicalType::Time { with_tz: true } => DdlType::exact("TIME WITH TIME ZONE"),
-        CanonicalType::Timestamp { with_tz: false } => DdlType::exact("TIMESTAMP"),
-        CanonicalType::Timestamp { with_tz: true } => {
+        // PG-side Time/Timestamp emission ignores the canonical precision —
+        // PG accepts TIMESTAMP(N) but the precision rarely round-trips
+        // meaningfully across dialects (mysql sub-second != pg sub-second
+        // semantics on conversion). Drop the precision on emission; the type
+        // is still semantically correct.
+        CanonicalType::Time { with_tz: false, .. } => DdlType::exact("TIME"),
+        CanonicalType::Time { with_tz: true, .. } => DdlType::exact("TIME WITH TIME ZONE"),
+        CanonicalType::Timestamp { with_tz: false, .. } => DdlType::exact("TIMESTAMP"),
+        CanonicalType::Timestamp { with_tz: true, .. } => {
             DdlType::exact("TIMESTAMP WITH TIME ZONE")
         }
         CanonicalType::Interval => DdlType::exact("INTERVAL"),
@@ -93,7 +108,10 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
         CanonicalType::Enum { .. } => {
             // Enum CREATE TYPE is handled separately; column uses the type name.
             // For cross-dialect, fall back to VARCHAR.
-            DdlType::approx("VARCHAR(255)", "Enum mapped to VARCHAR; use CREATE TYPE for native PG enum")
+            DdlType::approx(
+                "VARCHAR(255)",
+                "Enum mapped to VARCHAR; use CREATE TYPE for native PG enum",
+            )
         }
         CanonicalType::Array { element } => {
             let inner = from_canonical(element);
@@ -136,7 +154,13 @@ mod tests {
     fn test_pg_timestamptz() {
         let c = col("ts").udt("timestamptz").build();
         let ct = to_canonical(&c);
-        assert_eq!(ct, CanonicalType::Timestamp { with_tz: true });
+        assert_eq!(
+            ct,
+            CanonicalType::Timestamp {
+                with_tz: true,
+                precision: None
+            }
+        );
         let dt = from_canonical(&ct);
         assert_eq!(dt.sql_type, "TIMESTAMP WITH TIME ZONE");
     }

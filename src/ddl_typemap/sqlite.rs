@@ -27,8 +27,18 @@ pub fn to_canonical(col: &ColumnInfo) -> CanonicalType {
         }
         "blob" => return CanonicalType::Bytes { length: None },
         "date" => return CanonicalType::Date,
-        "datetime" | "timestamp" => return CanonicalType::Timestamp { with_tz: false },
-        "time" => return CanonicalType::Time { with_tz: false },
+        "datetime" | "timestamp" => {
+            return CanonicalType::Timestamp {
+                with_tz: false,
+                precision: None,
+            };
+        }
+        "time" => {
+            return CanonicalType::Time {
+                with_tz: false,
+                precision: None,
+            }
+        }
         "boolean" | "bool" => return CanonicalType::Boolean,
         "json" => return CanonicalType::Json,
         "" => return CanonicalType::Text, // No declared type
@@ -68,9 +78,7 @@ pub fn from_canonical(ct: &CanonicalType) -> DdlType {
             scale: Some(s),
         } => DdlType::exact(&format!("NUMERIC({p}, {s})")),
         CanonicalType::Decimal { .. } => DdlType::exact("NUMERIC"),
-        CanonicalType::Varchar { length: Some(n) } => {
-            DdlType::exact(&format!("VARCHAR({n})"))
-        }
+        CanonicalType::Varchar { length: Some(n) } => DdlType::exact(&format!("VARCHAR({n})")),
         CanonicalType::Varchar { length: None } => DdlType::exact("TEXT"),
         CanonicalType::Char { length: Some(n) } => DdlType::exact(&format!("CHAR({n})")),
         CanonicalType::Char { length: None } => DdlType::exact("TEXT"),
@@ -135,7 +143,11 @@ mod tests {
     #[test]
     fn test_timestamp_to_sqlite() {
         assert_eq!(
-            from_canonical(&CanonicalType::Timestamp { with_tz: true }).sql_type,
+            from_canonical(&CanonicalType::Timestamp {
+                with_tz: true,
+                precision: None
+            })
+            .sql_type,
             "DATETIME"
         );
     }
