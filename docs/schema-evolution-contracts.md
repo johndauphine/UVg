@@ -259,11 +259,73 @@ the actual MySQL database name; uvg's existing schema normalization in
 to `""` internally, so the contract loader should normalize the same way
 when populating `Contract::per_table`.
 
+### Configuration discovery
+
+Contracts are coupled to a specific source/target schema pair, so they
+belong next to the repo that owns the schema — versioned in git, reviewed
+in the same PRs as schema changes. uvg therefore looks for a contract in
+three places, in precedence order:
+
+1. **`--contract <inline>` / `--contract-file <path>`** — explicit,
+   per-invocation. Wins if set. `--contract-file` overrides `--contract`
+   for any granularity it sets; per-granularity keys merge via
+   `merge_contracts()`.
+2. **`./uvg.yaml`** in the process's current working directory —
+   auto-discovered. The contract lives under a `contract:` key, leaving
+   room for future settings without a second file. When an auto-discovered
+   file is loaded, print one line to stderr so the operator can see it
+   took effect:
+
+   ```
+   uvg: loaded contract from ./uvg.yaml
+   ```
+
+3. **No config** — all defaults (`evolve` everywhere). Today's behavior.
+
+Auto-discovery is shallow (cwd only, no walking up parent directories).
+Walking up risks picking up a contract from an unrelated repo when uvg is
+run from a subdirectory; the explicit `--contract-file` flag covers that
+case without surprise.
+
+Two file layouts are accepted for `./uvg.yaml`:
+
+```yaml
+# Bare contract — everything under the top level is treated as contract config.
+defaults:
+  tables: freeze
+  columns: evolve
+  data_types: freeze
+```
+
+```yaml
+# Nested under `contract:` — preferred, leaves room for other settings.
+contract:
+  defaults:
+    tables: freeze
+    columns: evolve
+  tables:
+    "public.users":
+      columns: discard
+```
+
+If both `defaults:` (bare) and `contract:` (nested) keys are present at
+the top level, the loader errors out — pick one. The nested form is
+preferred and will be the only form documented in the README.
+
+**Out of scope for this change:** a user-level config dir
+(`~/.config/uvg/`, `%APPDATA%\uvg\`). uvg has no genuinely global
+preferences today, and a user-level layer would let contracts vary by
+*who runs uvg* rather than *which repo it runs against* — the opposite of
+the governance shape we want. If a user-level config becomes warranted
+later (e.g. shared `trust_cert` defaults), add it as a separate change.
+
 ### Main flow
 
 In `src/main.rs`, after the DDL is produced but before output:
 
-1. Build the `Contract` from CLI args (`Cli::contract` + `Cli::contract_file`).
+1. Build the `Contract` from, in precedence order: `Cli::contract_file`
+   if set, else `Cli::contract` if set, else auto-discovered `./uvg.yaml`
+   if present, else `Contract::default()`.
 2. Call `compute_changes(...)` instead of `diff_schemas(...)` when a contract
    is set. (When no contract is set, the existing `diff_schemas()` path is
    preserved to keep the no-contract code path unchanged.)
@@ -318,7 +380,7 @@ non-interactive flag — the stderr output is the audit trail.
 
 | File | Change |
 |---|---|
-| `src/contract.rs` | **New.** Types (`ChangeKind`, `Change`, `Contract`, `ContractMode`, `Granularity`, `TableContract`, `ContractViolation`, `ApplyResult`); `Contract::apply()`; `parse_contract_arg()`; `load_contract_file()`; `merge_contracts()`. ~200 LOC. |
+| `src/contract.rs` | **New.** Types (`ChangeKind`, `Change`, `Contract`, `ContractMode`, `Granularity`, `TableContract`, `ContractViolation`, `ApplyResult`); `Contract::apply()`; `parse_contract_arg()`; `load_contract_file()`; `discover_contract()` (looks for `./uvg.yaml` in cwd, returns `Option<Contract>`); `merge_contracts()`. ~220 LOC. |
 | `src/main.rs` | Wire contract construction + violation handling between codegen and output. ~30 LOC. |
 | `src/cli.rs` | Two new `#[arg]` fields on `Cli`. ~10 LOC. |
 | `src/codegen/ddl_diff.rs` | Extract `compute_changes()` and `render_changes()` from `diff_schemas()`. Mechanical refactor: every `stmts.push(s)` site becomes a `Change` push. Where multiple SQL statements were pushed in one site for a single column (PG type+null+default), split into separate `Change`s by kind. ~50 LOC delta. |
@@ -345,6 +407,11 @@ Add unit tests inline in `src/contract.rs`:
    - Per-table override beats default.
 5. Default-schema normalization: a contract keyed on `"public.users"`
    matches a change tagged with schema `""` after normalization.
+5a. `discover_contract()` returns `None` when `./uvg.yaml` is absent,
+   `Some(contract)` when present in either bare or nested form, and
+   errors when both top-level forms coexist in the same file. Use a
+   `tempfile` directory + `std::env::set_current_dir` to avoid polluting
+   the workspace cwd.
 
 Add diff-engine tests in `src/codegen/ddl_diff.rs`:
 
@@ -420,6 +487,11 @@ explicitly to the user.
   normalization applied symmetrically to both the contract file and the
   `Change` records. This matches the existing cross-dialect diff
   semantics.
+- **Contract config lives next to the schema, not in a user dir.**
+  Auto-discovery is shallow (cwd-only, no walking up). No
+  `~/.config/uvg/` lookup. Contracts are repo-scoped governance; varying
+  them by who runs the tool would defeat the purpose. See
+  "Configuration discovery" for the full precedence.
 
 ## Things to ask the user before implementing
 
