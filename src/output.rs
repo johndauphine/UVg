@@ -76,7 +76,12 @@ impl OutputContext {
         target_dialect: Dialect,
         epoch_secs: u64,
     ) -> Self {
-        let tag = tag.unwrap_or_else(|| format!("{source_dialect}_to_{target_dialect}"));
+        // The tag flows into filenames, so any `/` or `..` would
+        // break the write (or worse, escape out_dir). Sanitize before
+        // it reaches run_id or the on-disk filenames so the value
+        // shown to the user in the manifest matches what's on disk.
+        let raw = tag.unwrap_or_else(|| format!("{source_dialect}_to_{target_dialect}"));
+        let tag = sanitize_path_component(&raw);
         let ts_compact = format_utc_compact(epoch_secs);
         let run_id = format!("{ts_compact}__{tag}");
         let generated_at = format_utc_iso8601(epoch_secs);
@@ -163,8 +168,47 @@ pub fn write_split_changes(
         }
     }
 
-    let mut written: Vec<String> = Vec::new();
     let filename = ctx.filename();
+    let runs_dir = ctx.out_dir.join("_runs");
+    let manifest_path = runs_dir.join(ctx.manifest_filename());
+
+    // Pre-probe every output path. If any already exists, abort before
+    // touching the filesystem so a same-second re-run (or a manual
+    // re-run with the same `--name`) cannot silently overwrite a prior
+    // migration's artifacts. A clear AlreadyExists error names the
+    // colliding path so the user can rerun with a different `--name`
+    // (or remove the file deliberately).
+    let mut planned: Vec<(PathBuf, String)> = Vec::with_capacity(groups.len());
+    for (subdir, _) in &groups {
+        let path = ctx.out_dir.join(subdir).join(&filename);
+        planned.push((path, subdir.clone()));
+    }
+    for (path, _) in &planned {
+        if path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "uvg: refusing to overwrite existing migration artifact {} \
+                     (run_id `{}` already used; pick a different --name)",
+                    path.display(),
+                    ctx.run_id,
+                ),
+            ));
+        }
+    }
+    if manifest_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "uvg: refusing to overwrite existing manifest {} \
+                 (run_id `{}` already used; pick a different --name)",
+                manifest_path.display(),
+                ctx.run_id,
+            ),
+        ));
+    }
+
+    let mut written: Vec<String> = Vec::new();
 
     for (subdir, group) in &groups {
         let dir = ctx.out_dir.join(subdir);
@@ -205,7 +249,6 @@ pub fn write_split_changes(
     // For deterministic git diffs we rely on `compute_changes()` itself
     // being deterministic for a given (source, target) pair.
 
-    let runs_dir = ctx.out_dir.join("_runs");
     fs::create_dir_all(&runs_dir)?;
     let manifest = Manifest {
         run_id: ctx.run_id.clone(),
@@ -218,7 +261,7 @@ pub fn write_split_changes(
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(io::Error::other)?;
-    fs::write(runs_dir.join(ctx.manifest_filename()), manifest_json + "\n")?;
+    fs::write(&manifest_path, manifest_json + "\n")?;
 
     Ok(Some(manifest))
 }
@@ -667,6 +710,97 @@ mod tests {
         // Benign names pass through unchanged.
         assert_eq!(sanitize_path_component("users"), "users");
         assert_eq!(sanitize_path_component("billing"), "billing");
+    }
+
+    #[test]
+    fn test_collision_refuses_overwrite() {
+        // Regression: codex round 2 caught that two `--out-dir` runs
+        // with the same `--name` in the same second silently truncated
+        // the earlier migration. The splitter must now refuse to
+        // overwrite and tell the user which path collided.
+        let dir = tmpdir("collision");
+        let ctx = make_ctx(dir.clone());
+        let changes = vec![Change {
+            table_schema: "".into(),
+            table_name: Some("users".into()),
+            sql: "CREATE TABLE users();".into(),
+        }];
+
+        let first = write_split_changes(&changes, &ctx).unwrap();
+        assert!(first.is_some(), "first write should succeed");
+
+        // Capture the on-disk state so we can prove the second run
+        // didn't touch it.
+        let before = fs::read_to_string(
+            dir.join("users").join("20260513T193000Z__add-email.sql"),
+        )
+        .unwrap();
+
+        let second = write_split_changes(&changes, &ctx);
+        assert!(second.is_err(), "second run with same ctx must error");
+        let err = second.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to overwrite") && msg.contains("--name"),
+            "error must explain how to recover: {msg}"
+        );
+
+        // First run's content is untouched.
+        let after = fs::read_to_string(
+            dir.join("users").join("20260513T193000Z__add-email.sql"),
+        )
+        .unwrap();
+        assert_eq!(before, after, "first run's file must be preserved");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_name_with_separators_sanitized() {
+        // Regression: codex round 2 caught that `--name feature/x` left
+        // a `/` inside the filename, which then failed with ENOENT
+        // because write_split_changes() only mkdir'd the table subdir,
+        // not the synthetic one introduced by the slash. The tag is now
+        // sanitized at OutputContext construction.
+        let dir = tmpdir("name-slash");
+        let ctx = OutputContext::at(
+            dir.clone(),
+            Some("feature/add-email".to_string()),
+            Dialect::Postgres,
+            Dialect::Postgres,
+            1_778_700_600,
+        );
+        // The slash is replaced with `_` in tag, run_id, and filenames.
+        assert_eq!(ctx.tag, "feature_add-email");
+        assert!(!ctx.run_id.contains('/'));
+
+        let changes = vec![Change {
+            table_schema: "".into(),
+            table_name: Some("users".into()),
+            sql: "CREATE TABLE users();".into(),
+        }];
+        let manifest = write_split_changes(&changes, &ctx)
+            .expect("sanitized tag must let write_split_changes succeed")
+            .expect("non-empty changes must produce a manifest");
+
+        // The actual on-disk path matches the sanitized run_id. No
+        // `feature/` subdir was created under users/.
+        let expected = dir
+            .join("users")
+            .join("20260513T193000Z__feature_add-email.sql");
+        assert!(expected.exists(), "expected file at {}", expected.display());
+        assert!(
+            !dir.join("users").join("feature").exists(),
+            "no stray feature/ subdir from the unsanitized slash"
+        );
+        // Manifest references the same on-disk name.
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.ends_with("__feature_add-email.sql")));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
