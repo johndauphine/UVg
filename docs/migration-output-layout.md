@@ -54,6 +54,18 @@ Add `--outfile <path>` (sqlacodegen-compatible single-file mode) and
   `src/main.rs`, `src/tui/mod.rs`. Do not change `src/introspect/` or
   `src/schema.rs`.
 
+## Known gaps (out of scope for this plan)
+
+- **`CREATE SCHEMA` emission.** `compute_changes` does not emit
+  `CREATE SCHEMA "billing"` ahead of `CREATE TABLE "billing"."orders"`.
+  Pre-existing behavior — `diff_schemas` has never produced schema
+  DDL — so non-default schemas must already exist in the target
+  before applying the generated migration. Fixing this needs target
+  introspection of `pg_namespace` / `information_schema.schemata`
+  (we don't introspect schemas today) plus cross-dialect schema DDL.
+  When implemented, the `_schema/` bucket and the apply-`_schema`-first
+  ordering already in place are the right home for it.
+
 ## Design
 
 ### The change-tagging refactor
