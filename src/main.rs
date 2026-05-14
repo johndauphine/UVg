@@ -22,8 +22,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, ConnectionConfig};
 use crate::codegen::declarative::DeclarativeGenerator;
+use crate::codegen::ddl_diff::compute_changes;
 use crate::codegen::tables::TablesGenerator;
 use crate::codegen::Generator;
+use crate::output::{write_split_changes, OutputContext};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -170,6 +172,41 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+
+            // --out-dir: per-table diff layout. Only kicks in when there's
+            // a target to diff against and --outfile is not set (--outfile
+            // wins per docs/migration-output-layout.md).
+            if cli.outfile.is_none() {
+                if let Some(ref out_dir) = cli.out_dir {
+                    let Some(target) = target_schema.as_ref() else {
+                        return Err(anyhow::anyhow!(
+                            "--out-dir requires a target database URL to diff against"
+                        ));
+                    };
+                    let changes = compute_changes(&schema, target, &ddl_opts);
+                    let ctx = OutputContext::now(
+                        out_dir.clone(),
+                        cli.name.clone(),
+                        dialect,
+                        ddl_opts.target_dialect,
+                    );
+                    let run_id = ctx.run_id.clone();
+                    match write_split_changes(&changes, &ctx)? {
+                        None => {
+                            eprintln!("uvg: no schema changes");
+                        }
+                        Some(manifest) => {
+                            eprintln!(
+                                "uvg: wrote {} file(s) under {} (manifest: _runs/{}.json)",
+                                manifest.files.len(),
+                                out_dir.display(),
+                                run_id,
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+            }
 
             let gen = DdlGenerator;
             let ddl_output = gen.generate(&schema, target_schema.as_ref(), &ddl_opts);

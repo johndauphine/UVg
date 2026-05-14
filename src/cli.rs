@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 use crate::dialect::Dialect;
@@ -49,6 +51,19 @@ pub struct Cli {
     /// Output file or directory (default: stdout)
     #[arg(long)]
     pub outfile: Option<String>,
+
+    /// Write per-table DDL diff into this directory. One subdir per
+    /// modified table plus `_schema/` for non-table-scoped DDL and
+    /// `_runs/` for the manifest. Empty diffs write nothing.
+    /// Only meaningful for the `ddl` generator with a target URL.
+    /// `--outfile` takes precedence if both are set.
+    #[arg(long)]
+    pub out_dir: Option<PathBuf>,
+
+    /// Slug used in `--out-dir` filenames. Defaults to
+    /// `<source>_to_<target>` (e.g. `postgres_to_mysql`).
+    #[arg(long)]
+    pub name: Option<String>,
 
     /// Trust the server certificate (MSSQL only)
     #[arg(long)]
@@ -201,6 +216,8 @@ impl Cli {
                 noviews: false,
                 options: None,
                 outfile: None,
+                out_dir: None,
+                name: None,
                 trust_cert: self.trust_cert,
                 interactive: false,
             };
@@ -237,6 +254,8 @@ impl Cli {
             noviews: false,
             options: None,
             outfile: None,
+            out_dir: None,
+            name: None,
             trust_cert: self.trust_cert,
             interactive: false,
         };
@@ -379,6 +398,8 @@ mod tests {
             noviews: false,
             options: None,
             outfile: None,
+            out_dir: None,
+            name: None,
             trust_cert: false,
             interactive: false,
         }

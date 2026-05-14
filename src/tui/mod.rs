@@ -654,6 +654,8 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
         noviews: false,
         options: None,
         outfile: None,
+        out_dir: None,
+        name: None,
         trust_cert,
         interactive: false,
     }
