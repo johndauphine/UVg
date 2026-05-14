@@ -32,6 +32,11 @@ Assumes Docker containers `mssql-test` (port 1433), `pg-test` (port 5432),
 `mysql-test` (port 3306) with password `TestPass2024`. Container names are
 overridable via `$MSSQL_CONTAINER`, `$PG_CONTAINER`, `$MYSQL_CONTAINER`.
 
+Also assumes `sqlcmd` on the **host** PATH (the runner shells out for
+MSSQL targets — PG/MySQL go through `docker exec`). Microsoft's
+[`go-sqlcmd`](https://github.com/microsoft/go-sqlcmd/releases) is a
+single static binary that satisfies this — drop it in `~/.local/bin/`.
+
 ### MSSQL (azure-sql-edge or mssql-server)
 
 ```bash
