@@ -220,7 +220,10 @@ pub fn write_split_changes(
 /// Determine the subdirectory under `out_dir` for a given change.
 /// `_schema` for non-table-scoped DDL, `<table>` for default-schema
 /// tables, `<schema>__<table>` for non-default schemas.
-fn subdir_for(change: &Change) -> String {
+///
+/// Exposed at the crate level so the TUI tree pane can show the same
+/// node names a user would see on disk after `--out-dir`.
+pub(crate) fn subdir_for(change: &Change) -> String {
     match &change.table_name {
         None => "_schema".to_string(),
         Some(name) => {
