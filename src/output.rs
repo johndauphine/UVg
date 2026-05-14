@@ -172,18 +172,40 @@ pub fn write_split_changes(
     let runs_dir = ctx.out_dir.join("_runs");
     let manifest_path = runs_dir.join(ctx.manifest_filename());
 
-    // Pre-probe every output path. If any already exists, abort before
-    // touching the filesystem so a same-second re-run (or a manual
-    // re-run with the same `--name`) cannot silently overwrite a prior
-    // migration's artifacts. A clear AlreadyExists error names the
-    // colliding path so the user can rerun with a different `--name`
-    // (or remove the file deliberately).
-    let mut planned: Vec<(PathBuf, String)> = Vec::with_capacity(groups.len());
+    // Pre-probe every output path before touching the filesystem so a
+    // same-second re-run cannot silently overwrite a prior migration's
+    // artifacts AND a partial write can't be left behind when a planned
+    // destination is an unexpected file type. Two failure modes are
+    // checked in this order:
+    //   (a) per-table subdir already exists but is a regular file
+    //       (the next create_dir_all would later blow up mid-loop,
+    //       leaving earlier table files orphaned);
+    //   (b) the target .sql / .json file already exists (run_id
+    //       collision — pick a different --name).
+    let mut planned: Vec<PathBuf> = Vec::with_capacity(groups.len());
     for (subdir, _) in &groups {
-        let path = ctx.out_dir.join(subdir).join(&filename);
-        planned.push((path, subdir.clone()));
+        let dir = ctx.out_dir.join(subdir);
+        if dir.exists() && !dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "uvg: cannot create migration subdirectory {}: a regular file with that name already exists",
+                    dir.display(),
+                ),
+            ));
+        }
+        planned.push(dir.join(&filename));
     }
-    for (path, _) in &planned {
+    if runs_dir.exists() && !runs_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "uvg: cannot create manifest directory {}: a regular file with that name already exists",
+                runs_dir.display(),
+            ),
+        ));
+    }
+    for path in &planned {
         if path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -266,27 +288,50 @@ pub fn write_split_changes(
     Ok(Some(manifest))
 }
 
+/// Subdirectories under `out_dir` that uvg reserves for its own
+/// metadata. A real table whose normalized name collides with one of
+/// these would be misrouted into the metadata bucket — `_schema` is
+/// special-cased by [`apply_order`] and the TUI; `_runs` holds
+/// manifests. Tables that hit either name are escaped via
+/// [`escape_reserved`].
+const RESERVED_SUBDIRS: &[&str] = &["_schema", "_runs"];
+
 /// Determine the subdirectory under `out_dir` for a given change.
 /// `_schema` for non-table-scoped DDL, `<table>` for default-schema
 /// tables, `<schema>__<table>` for non-default schemas.
 ///
 /// Identifiers are sanitized (`sanitize_path_component`) before being
 /// folded into a path so a quoted table name like `../escape` cannot
-/// write outside `out_dir`. The TUI uses this same function for its
-/// tree labels, so what a user sees on screen always matches what
-/// lands on disk.
+/// write outside `out_dir`. A real table whose name collides with a
+/// reserved metadata directory (`_schema`, `_runs`) is rewritten with
+/// a `_table` suffix so it doesn't get treated as schema-scoped DDL or
+/// manifest storage. The TUI uses this same function for its tree
+/// labels, so what a user sees on screen always matches what lands on
+/// disk.
 pub(crate) fn subdir_for(change: &Change) -> String {
     match &change.table_name {
         None => "_schema".to_string(),
         Some(name) => {
             let safe_name = sanitize_path_component(name);
-            if change.table_schema.is_empty() {
+            let bucket = if change.table_schema.is_empty() {
                 safe_name
             } else {
                 let safe_schema = sanitize_path_component(&change.table_schema);
                 format!("{safe_schema}__{safe_name}")
-            }
+            };
+            escape_reserved(&bucket)
         }
+    }
+}
+
+/// Escape table buckets that would collide with uvg's reserved
+/// metadata directories. Appending `_table` keeps the original
+/// identifier readable while making it unambiguous on disk.
+fn escape_reserved(bucket: &str) -> String {
+    if RESERVED_SUBDIRS.contains(&bucket) {
+        format!("{bucket}_table")
+    } else {
+        bucket.to_string()
     }
 }
 
@@ -710,6 +755,115 @@ mod tests {
         // Benign names pass through unchanged.
         assert_eq!(sanitize_path_component("users"), "users");
         assert_eq!(sanitize_path_component("billing"), "billing");
+    }
+
+    #[test]
+    fn test_table_named_schema_does_not_collide_with_metadata_dir() {
+        // Regression: codex round 3 caught that a real table literally
+        // named `_schema` returned the same subdir as non-table-scoped
+        // DDL. The TUI and apply_order special-case `_schema`, so a
+        // real `_schema` table would be applied first regardless of
+        // its real FK position. The bucket is now escaped to
+        // `_schema_table`.
+        let schema_table = Change {
+            table_schema: "".into(),
+            table_name: Some("_schema".into()),
+            sql: "CREATE TABLE \"_schema\"(id int);".into(),
+        };
+        assert_eq!(subdir_for(&schema_table), "_schema_table");
+
+        let runs_table = Change {
+            table_schema: "".into(),
+            table_name: Some("_runs".into()),
+            sql: "CREATE TABLE \"_runs\"(id int);".into(),
+        };
+        assert_eq!(subdir_for(&runs_table), "_runs_table");
+
+        // Schema-scoped DDL still goes to `_schema`.
+        let scoped = Change {
+            table_schema: "".into(),
+            table_name: None,
+            sql: "CREATE TYPE color AS ENUM('r','g','b');".into(),
+        };
+        assert_eq!(subdir_for(&scoped), "_schema");
+    }
+
+    #[test]
+    fn test_table_named_schema_writes_to_distinct_subdir() {
+        // End-to-end check: when a real `_schema` table coexists with
+        // schema-scoped DDL, they land in distinct directories on disk.
+        let dir = tmpdir("schema-collision");
+        let ctx = make_ctx(dir.clone());
+        let changes = vec![
+            Change {
+                table_schema: "".into(),
+                table_name: None,
+                sql: "CREATE TYPE color AS ENUM('r','g','b');".into(),
+            },
+            Change {
+                table_schema: "".into(),
+                table_name: Some("_schema".into()),
+                sql: "CREATE TABLE \"_schema\"(id int);".into(),
+            },
+        ];
+        let manifest = write_split_changes(&changes, &ctx).unwrap().unwrap();
+        assert!(dir.join("_schema").is_dir(), "schema-scoped dir present");
+        assert!(dir.join("_schema_table").is_dir(), "real `_schema` table goes to _schema_table");
+        // Each one has its own file, neither mixed.
+        let schema_body = fs::read_to_string(
+            dir.join("_schema").join("20260513T193000Z__add-email.sql"),
+        )
+        .unwrap();
+        let table_body = fs::read_to_string(
+            dir.join("_schema_table").join("20260513T193000Z__add-email.sql"),
+        )
+        .unwrap();
+        assert!(schema_body.contains("CREATE TYPE"));
+        assert!(!schema_body.contains("CREATE TABLE"));
+        assert!(table_body.contains("CREATE TABLE"));
+        assert!(!table_body.contains("CREATE TYPE"));
+        // Manifest references both.
+        assert!(manifest.files.iter().any(|f| f.starts_with("_schema/")));
+        assert!(manifest.files.iter().any(|f| f.starts_with("_schema_table/")));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_preflight_aborts_when_subdir_is_regular_file() {
+        // Regression: codex round 3 caught that if `migrations/posts`
+        // is already a regular file, the per-target-file probe still
+        // passed (posts/<filename> doesn't exist), and the write loop
+        // would create `users/...sql` before dying on create_dir_all
+        // for `posts`. The preflight must check each subdir's type
+        // too, so we abort with zero partial writes.
+        let dir = tmpdir("subdir-conflict");
+        let ctx = make_ctx(dir.clone());
+        // Pre-create `posts` as a regular file. The write attempt for
+        // this run plans `users/` and `posts/` subdirs.
+        fs::write(dir.join("posts"), b"not a directory").unwrap();
+        let changes = vec![
+            Change {
+                table_schema: "".into(),
+                table_name: Some("users".into()),
+                sql: "CREATE TABLE users();".into(),
+            },
+            Change {
+                table_schema: "".into(),
+                table_name: Some("posts".into()),
+                sql: "CREATE TABLE posts();".into(),
+            },
+        ];
+        let result = write_split_changes(&changes, &ctx);
+        assert!(result.is_err(), "preflight must fail");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        // No partial state — no users/ subdir, no manifest, no _runs/.
+        assert!(!dir.join("users").exists(), "must not write users/ on aborted preflight");
+        assert!(!dir.join("_runs").exists(), "must not create _runs/ on aborted preflight");
+        // The pre-existing posts file is untouched.
+        let body = fs::read(dir.join("posts")).unwrap();
+        assert_eq!(body, b"not a directory");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
