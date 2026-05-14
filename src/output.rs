@@ -197,7 +197,13 @@ pub fn write_split_changes(
         written.push(format!("{subdir}/{filename}"));
     }
 
-    written.sort();
+    // Do NOT sort `written`. `apply_order()` consumes `manifest.files`
+    // and relies on the topological order that `compute_changes()` already
+    // imposes (so a referencing table's CREATE follows the referenced
+    // one's). Lexicographic sorting here breaks FK-dependent migrations
+    // whose alphabetical order differs from their topological order.
+    // For deterministic git diffs we rely on `compute_changes()` itself
+    // being deterministic for a given (source, target) pair.
 
     let runs_dir = ctx.out_dir.join("_runs");
     fs::create_dir_all(&runs_dir)?;
@@ -221,18 +227,48 @@ pub fn write_split_changes(
 /// `_schema` for non-table-scoped DDL, `<table>` for default-schema
 /// tables, `<schema>__<table>` for non-default schemas.
 ///
-/// Exposed at the crate level so the TUI tree pane can show the same
-/// node names a user would see on disk after `--out-dir`.
+/// Identifiers are sanitized (`sanitize_path_component`) before being
+/// folded into a path so a quoted table name like `../escape` cannot
+/// write outside `out_dir`. The TUI uses this same function for its
+/// tree labels, so what a user sees on screen always matches what
+/// lands on disk.
 pub(crate) fn subdir_for(change: &Change) -> String {
     match &change.table_name {
         None => "_schema".to_string(),
         Some(name) => {
+            let safe_name = sanitize_path_component(name);
             if change.table_schema.is_empty() {
-                name.clone()
+                safe_name
             } else {
-                format!("{}__{}", change.table_schema, name)
+                let safe_schema = sanitize_path_component(&change.table_schema);
+                format!("{safe_schema}__{safe_name}")
             }
         }
+    }
+}
+
+/// Make a string safe to use as a single path component:
+/// - replace characters that have filesystem semantics (`/`, `\`, `:`,
+///   `\0`) with `_` so the result is always a single directory level;
+/// - rewrite empty / `.` / `..` to `_` so the path can't ascend out of
+///   `out_dir` when joined.
+///
+/// Encoded names may collide (`a/b` and `a_b` both become `a_b`), but
+/// that's acceptable: collisions concatenate SQL into one file rather
+/// than overwriting an unrelated table's directory. The threat model
+/// is filesystem escape, not perfect round-tripping of identifiers.
+fn sanitize_path_component(s: &str) -> String {
+    let mapped: String = s
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '\0' => '_',
+            other => other,
+        })
+        .collect();
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        "_".to_string()
+    } else {
+        mapped
     }
 }
 
@@ -559,5 +595,131 @@ mod tests {
         );
         assert_eq!(ctx.tag, "postgres_to_mysql");
         assert_eq!(ctx.run_id, "20260513T193000Z__postgres_to_mysql");
+    }
+
+    #[test]
+    fn test_manifest_preserves_topological_order() {
+        // Regression: codex review caught that `written.sort()` was
+        // re-sorting manifest.files alphabetically, which clobbered the
+        // FK topological order from compute_changes. Here `users` is
+        // referenced by `posts`; topo order is [users, posts] but
+        // lexicographic order is [posts, users]. The manifest must hold
+        // topo order so apply_order() runs `users` first.
+        let dir = tmpdir("topo");
+        let ctx = make_ctx(dir.clone());
+        let changes = vec![
+            Change {
+                table_schema: "".into(),
+                table_name: Some("users".into()),
+                sql: "CREATE TABLE users();".into(),
+            },
+            Change {
+                table_schema: "".into(),
+                table_name: Some("posts".into()),
+                sql: "CREATE TABLE posts(user_id int REFERENCES users(id));".into(),
+            },
+        ];
+        let manifest = write_split_changes(&changes, &ctx).unwrap().unwrap();
+        let users_idx = manifest
+            .files
+            .iter()
+            .position(|f| f.starts_with("users/"))
+            .expect("users entry");
+        let posts_idx = manifest
+            .files
+            .iter()
+            .position(|f| f.starts_with("posts/"))
+            .expect("posts entry");
+        assert!(
+            users_idx < posts_idx,
+            "manifest.files must keep users before posts (topo); got {:?}",
+            manifest.files
+        );
+
+        // And apply_order must propagate that order to the final list of
+        // paths handed to db::execute_ddl.
+        let order = apply_order(&manifest, &dir);
+        let order_strs: Vec<String> =
+            order.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let users_p = order_strs
+            .iter()
+            .position(|s| s.contains("users/"))
+            .unwrap();
+        let posts_p = order_strs
+            .iter()
+            .position(|s| s.contains("posts/"))
+            .unwrap();
+        assert!(users_p < posts_p, "apply_order must run users before posts: {order_strs:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_sanitize_path_component_blocks_traversal() {
+        assert_eq!(sanitize_path_component("../escape"), ".._escape");
+        assert_eq!(sanitize_path_component(".."), "_");
+        assert_eq!(sanitize_path_component("."), "_");
+        assert_eq!(sanitize_path_component(""), "_");
+        assert_eq!(sanitize_path_component("/etc/passwd"), "_etc_passwd");
+        assert_eq!(sanitize_path_component("a\\b"), "a_b");
+        assert_eq!(sanitize_path_component("c:\\windows"), "c__windows");
+        assert_eq!(sanitize_path_component("with\0null"), "with_null");
+        // Benign names pass through unchanged.
+        assert_eq!(sanitize_path_component("users"), "users");
+        assert_eq!(sanitize_path_component("billing"), "billing");
+    }
+
+    #[test]
+    fn test_malicious_table_name_cannot_escape_out_dir() {
+        // Regression: codex review caught that raw identifiers were
+        // joined under out_dir, so a table named `../escape` would write
+        // outside the directory. The splitter must keep every written
+        // file under ctx.out_dir.
+        let dir = tmpdir("escape");
+        let ctx = make_ctx(dir.clone());
+        let changes = vec![
+            Change {
+                table_schema: "".into(),
+                table_name: Some("../escape".into()),
+                sql: "CREATE TABLE evil();".into(),
+            },
+            Change {
+                table_schema: "".into(),
+                table_name: Some("/etc/passwd".into()),
+                sql: "CREATE TABLE worse();".into(),
+            },
+        ];
+        let manifest = write_split_changes(&changes, &ctx).unwrap().unwrap();
+
+        // Every manifest entry, when joined under out_dir, must resolve
+        // to a path inside out_dir (no `..`, no absolute paths).
+        let dir_canon = dir.canonicalize().unwrap();
+        for f in &manifest.files {
+            let full = dir.join(f);
+            // The file actually exists where we recorded it.
+            assert!(full.exists(), "manifest references missing path: {f}");
+            // Its canonical form is under the canonical out_dir.
+            let full_canon = full.canonicalize().unwrap();
+            assert!(
+                full_canon.starts_with(&dir_canon),
+                "file {} resolved to {} which escapes {}",
+                f,
+                full_canon.display(),
+                dir_canon.display(),
+            );
+        }
+
+        // Nothing should have been written to the parent of out_dir.
+        let parent = dir.parent().unwrap();
+        for entry in fs::read_dir(parent).unwrap() {
+            let p = entry.unwrap().path();
+            assert!(
+                p == dir || !p.file_name().unwrap().to_string_lossy().contains("escape"),
+                "found escape file at {}",
+                p.display()
+            );
+        }
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
