@@ -549,6 +549,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_out_dir_preflights_all_files_before_executing() {
+        // Regression: codex round 4 caught that --apply --out-dir
+        // applied files one by one. If file 1 had executable SQL
+        // (e.g. ADD COLUMN on users) and file 2 had an unappliable
+        // marker (e.g. ALTER COLUMN warning on posts), file 1 ran
+        // before file 2's rejection — recreating the partial-migration
+        // bug the single-blob marker guard avoids. apply_manifest now
+        // reads + validates every file first, then executes.
+        let dir = tmpdir("apply-outdir-preflight");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        let migrations = dir.join("migrations");
+
+        // FK from posts → users means topo sort puts `users` first.
+        // Source adds a `phone` column on users (executable ADD COLUMN)
+        // and changes `body` type on posts (SQLite ALTER COLUMN warning).
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, phone TEXT);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        exec_sql(
+            &target,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body INTEGER,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+        let mig_str = migrations.display().to_string();
+
+        let out = run_uvg(&[
+            "--generator", "ddl",
+            "--apply",
+            "--out-dir", &mig_str,
+            "--name", "mixed",
+            &src_url, &tgt_url,
+        ]);
+        assert!(!out.status.success(), "preflight must reject the run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("refusing to apply") && stderr.contains("ALTER COLUMN"),
+            "expected marker-specific error, got: {stderr}"
+        );
+
+        // The earlier-topo users.sql must NOT have run — target.users
+        // must still lack the phone column. This is the regression
+        // signal: without preflight, users would have phone now.
+        let cols: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM pragma_table_info('users')",
+        )
+        .fetch_all(
+            &sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}?mode=ro", target.display()))
+                .await
+                .expect("sqlite connect"),
+        )
+        .await
+        .expect("schema query");
+        let names: Vec<&str> = cols.iter().map(|(n,)| n.as_str()).collect();
+        assert!(
+            !names.contains(&"phone"),
+            "users.phone must not have been added (preflight should have stopped this): {names:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn test_apply_rejects_mixed_diff_with_unappliable_warning() {
         // Regression: codex round 3 caught that round 2's guard only
         // fired when split_statements returned EMPTY. A diff that
