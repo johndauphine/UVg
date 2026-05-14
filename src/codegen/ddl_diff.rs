@@ -9,30 +9,13 @@ use crate::cli::DdlOptions;
 use crate::codegen::{is_auto_increment_column, topo_sort_tables};
 use crate::ddl_typemap;
 use crate::dialect::Dialect;
+use crate::output::Change;
 use crate::schema::{ColumnInfo, IntrospectedSchema, TableInfo, TableType};
 
 use super::ddl::{
     format_ddl_default_typed, generate_column_def, generate_create_table, generate_indexes,
     qualified_table_name, quote_identifier,
 };
-
-/// A single SQL statement emitted by the diff engine, tagged with the
-/// table it pertains to. The tag lets the per-table output splitter route
-/// the statement into the right subdirectory; non-table-scoped DDL
-/// (enums, `CREATE SCHEMA`, etc.) uses `table_name: None`.
-///
-/// `table_schema` is normalized: default schemas (`public`, `dbo`, `main`,
-/// the MySQL default database, and `""`) are stored as `""`, so the splitter
-/// doesn't need dialect awareness.
-// The tag fields are populated now but only read by the per-table splitter
-// landing in step 2 (`src/output.rs`). Suppress the warning until then.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct Change {
-    pub table_schema: String,
-    pub table_name: Option<String>,
-    pub sql: String,
-}
 
 /// Compute the schema diff as a stream of tagged `Change` records.
 ///

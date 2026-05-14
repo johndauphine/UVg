@@ -6,6 +6,7 @@ mod dialect;
 mod error;
 mod introspect;
 mod naming;
+mod output;
 mod schema;
 #[cfg(test)]
 mod testutil;
