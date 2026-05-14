@@ -162,7 +162,7 @@ Every generated `.sql` file starts with a provenance header:
 
 ### Manifest
 
-One JSON per run in `_runs/`:
+One JSON per **non-empty** run in `_runs/`:
 
 ```json
 {
@@ -179,9 +179,12 @@ One JSON per run in `_runs/`:
 }
 ```
 
-Empty diffs still write a manifest with `files: []` and
-`stats.changes: 0` — the manifest is the audit trail that uvg ran and
-found nothing. No `.sql` files in that case.
+**Empty diffs write nothing.** No `.sql` files, no manifest. The
+mental model is: "if there are no schema changes, no new files appear
+in git." A no-op run prints a single line to stderr
+(`uvg: no schema changes`) and exits 0; that's the only signal that
+uvg ran. If you need a persistent record of every invocation, redirect
+stderr in your wrapper.
 
 ### Apply ordering
 
@@ -251,8 +254,9 @@ Integration tests in `tests/integration.rs`:
    - `_schema/` present iff non-table-scoped DDL was emitted.
    - `_runs/<run_id>.json` manifest exists and parses.
    - Every `.sql` file starts with the provenance header.
-   - Re-running against unchanged source/target writes a manifest with
-     zero `.sql` files and `stats.changes == 0`.
+   - Re-running against unchanged source/target writes **nothing** —
+     no `.sql`, no `_schema/`, no `_runs/`. `<tmpdir>` is byte-identical
+     before and after the second run.
 6. `--outfile`: single combined file with provenance header, body
    matches today's stdout.
 
