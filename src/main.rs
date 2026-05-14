@@ -351,20 +351,47 @@ fn write_output(output: &str, outfile: &Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Substrings that signal a chunk of DDL needs manual schema work
+/// uvg can't perform. If any of these appear in the blob handed to
+/// [`apply_blob`], the apply is refused before any statement runs.
+/// Without this guard a mixed diff (a real `ADD COLUMN` plus a
+/// comment-only warning) would partially apply and exit 0, leaving
+/// the target out of sync with the source — bad for CI.
+const UNAPPLIABLE_MARKERS: &[&str] = &[
+    "-- WARNING: SQLite does not support ALTER COLUMN",
+    "-- NOTE: MSSQL requires dropping the named default constraint",
+];
+
 /// Apply a single DDL blob to the target. Returns the count of
 /// successful statements. On any failure, returns a contextual error
 /// quoting the offending statement and the database's error message —
 /// the binary then exits non-zero, which is load-bearing for CI/scripted
 /// callers per issue #57's "side benefits" section.
 ///
-/// **Comment-only blobs are rejected** (unless they're the explicit
-/// "no schema changes" sentinel). Some diffs — notably SQLite ALTER
-/// COLUMN and MSSQL DROP CONSTRAINT cases — emit warning comments
-/// instead of executable SQL, signaling that the operation needs
-/// manual schema work. Silently reporting "applied 0 statement(s)"
-/// in that case would leave the user thinking the apply succeeded
-/// while the target schema is unchanged.
+/// **Refuses any blob carrying an [`UNAPPLIABLE_MARKERS`] warning**,
+/// even if it also contains executable SQL. Mixed diffs that ran the
+/// executable bits and silently dropped the warning chunk would leave
+/// the target partially migrated while still reporting success.
+///
+/// Also refuses purely comment-only blobs (other than the
+/// "No schema changes detected" sentinel) as a defense-in-depth check.
 async fn apply_blob(target_config: &ConnectionConfig, sql: &str) -> anyhow::Result<usize> {
+    // First gate: any unappliable warning marker — even if real DDL
+    // sits alongside it — disqualifies the entire blob. The user must
+    // fall back to --outfile / --out-dir and reconcile by hand.
+    if let Some(marker) = UNAPPLIABLE_MARKERS.iter().find(|m| sql.contains(*m)) {
+        return Err(anyhow::anyhow!(
+            "refusing to apply: the diff contains an instruction uvg cannot execute on its own:\n  {}\n\
+             Inspect the full diff with `--outfile` or `--out-dir` and apply the actionable parts \
+             manually so the target doesn't end up partially migrated.",
+            marker
+        ));
+    }
+
+    // Second gate: an all-comment blob that didn't trip the marker
+    // gate (likely a future emit pattern uvg doesn't yet recognise).
+    // The explicit "no schema changes" sentinel is the one legitimate
+    // zero-statement case.
     let statements = db::split_statements(sql);
     if statements.is_empty() {
         let trimmed = sql.trim();
@@ -372,10 +399,8 @@ async fn apply_blob(target_config: &ConnectionConfig, sql: &str) -> anyhow::Resu
             || trimmed.starts_with("-- No schema changes detected");
         if !is_noop_sentinel {
             return Err(anyhow::anyhow!(
-                "refusing to apply: the diff produced changes but they're all non-executable text \
-                 (likely SQLite ALTER COLUMN warnings or MSSQL constraint-drop notes — those need \
-                 manual schema work). Inspect the diff with `--outfile` or `--out-dir` and apply \
-                 the actionable parts by hand."
+                "refusing to apply: the diff produced changes but they're all non-executable text. \
+                 Inspect with `--outfile` or `--out-dir` and apply the actionable parts by hand."
             ));
         }
     }

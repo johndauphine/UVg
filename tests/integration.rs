@@ -520,11 +520,13 @@ mod tests {
         let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
         assert!(!out.status.success(), "must exit non-zero on comment-only diff");
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // The error wording shifted between codex rounds; pin only the
+        // structural promises: clear refusal, mention of --outfile/--out-dir
+        // so the user knows where to look, and a hint about what triggered it.
         assert!(
             stderr.contains("refusing to apply")
-                && stderr.contains("non-executable")
-                && stderr.contains("--outfile"),
-            "expected guidance pointing at --outfile inspection, got: {stderr}"
+                && (stderr.contains("--outfile") || stderr.contains("--out-dir")),
+            "expected refusal + inspection hint, got: {stderr}"
         );
 
         // Target's schema must be unchanged — confirm column type stayed.
@@ -542,6 +544,63 @@ mod tests {
         .expect("schema query");
         let email = tgt_cols.iter().find(|(n, _)| n == "email").expect("email column");
         assert_eq!(email.1, "INTEGER", "target schema must be untouched: {tgt_cols:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_rejects_mixed_diff_with_unappliable_warning() {
+        // Regression: codex round 3 caught that round 2's guard only
+        // fired when split_statements returned EMPTY. A diff that
+        // contains a real ADD COLUMN AND a comment-only ALTER COLUMN
+        // warning would silently execute the ADD COLUMN, drop the
+        // warning chunk, and exit 0 — target partially migrated, CI
+        // green. The marker check now rejects the whole apply before
+        // any statement runs.
+        let dir = tmpdir("apply-mixed-warning");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+
+        // Source: email TEXT (type change vs target) + phone TEXT (new).
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, phone TEXT);",
+        )
+        .await;
+        // Target: email INTEGER (drives the ALTER COLUMN warning), no
+        // phone column (drives a real ADD COLUMN — the executable bit
+        // that would have leaked through the round-2 guard).
+        exec_sql(&target, "CREATE TABLE users(id INTEGER PRIMARY KEY, email INTEGER);").await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(!out.status.success(), "mixed diff must error before applying");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("refusing to apply") && stderr.contains("ALTER COLUMN"),
+            "expected marker-specific error, got: {stderr}"
+        );
+
+        // The ADD COLUMN must NOT have run — target schema must still
+        // lack the `phone` column. This is the bug codex caught: with
+        // the round-2 guard, the ADD COLUMN would have applied and
+        // phone would now be present.
+        let cols: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM pragma_table_info('users')",
+        )
+        .fetch_all(
+            &sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}?mode=ro", target.display()))
+                .await
+                .expect("sqlite connect"),
+        )
+        .await
+        .expect("schema query");
+        let names: Vec<&str> = cols.iter().map(|(n,)| n.as_str()).collect();
+        assert!(!names.contains(&"phone"), "ADD COLUMN must not have run: {names:?}");
+        assert!(names.contains(&"id") && names.contains(&"email"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
