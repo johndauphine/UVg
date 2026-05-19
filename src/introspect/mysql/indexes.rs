@@ -1,7 +1,7 @@
 use sqlx::MySqlPool;
-use std::collections::BTreeMap;
 
 use crate::error::UvgError;
+use crate::introspect::grouping::{grouped_indexes, IndexColumn};
 use crate::schema::IndexInfo;
 
 pub async fn query_indexes(
@@ -28,24 +28,13 @@ pub async fn query_indexes(
     .fetch_all(pool)
     .await?;
 
-    let mut index_map: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
-    for row in rows {
-        let entry = index_map
-            .entry(row.index_name)
-            .or_insert_with(|| (!row.non_unique, Vec::new()));
+    let indexes = grouped_indexes(rows.into_iter().map(|row| IndexColumn {
+        index_name: row.index_name,
+        is_unique: !row.non_unique,
         // COLUMN_NAME is NULL for functional/expression indexes (MySQL 8+);
         // skip those columns rather than crashing.
-        if let Some(col) = row.column_name {
-            entry.1.push(col);
-        }
-    }
-
-    // Filter out indexes that ended up with no columns (purely expression-based)
-    let indexes = index_map
-        .into_iter()
-        .filter(|(_, (_, cols))| !cols.is_empty())
-        .map(|(name, (is_unique, columns))| IndexInfo::new(name, is_unique, columns))
-        .collect();
+        column: row.column_name,
+    }));
 
     Ok(indexes)
 }

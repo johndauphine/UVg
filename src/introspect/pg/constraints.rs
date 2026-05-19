@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
-
 use sqlx::PgPool;
 
 use crate::error::UvgError;
-use crate::schema::{ConstraintInfo, ForeignKeyInfo};
+use crate::introspect::grouping::{
+    foreign_key_constraints, primary_key_constraints, unique_constraints, ForeignKeyColumn,
+};
+use crate::schema::ConstraintInfo;
 
 pub async fn query_constraints(
     pool: &PgPool,
@@ -29,17 +30,9 @@ pub async fn query_constraints(
     .fetch_all(pool)
     .await?;
 
-    // Group PK columns by constraint name
-    let mut pk_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for row in pk_rows {
-        pk_map
-            .entry(row.constraint_name)
-            .or_default()
-            .push(row.column_name);
-    }
-    for (name, columns) in pk_map {
-        constraints.push(ConstraintInfo::primary_key(name, columns));
-    }
+    constraints.extend(primary_key_constraints(pk_rows, |row| {
+        (row.constraint_name, row.column_name)
+    }));
 
     // Foreign keys
     let fk_rows = sqlx::query_as::<_, FkRow>(
@@ -68,39 +61,17 @@ pub async fn query_constraints(
     .fetch_all(pool)
     .await?;
 
-    // Group FK columns by constraint name
-    let mut fk_map: BTreeMap<String, FkAccumulator> = BTreeMap::new();
-    for row in fk_rows {
-        let acc = fk_map
-            .entry(row.constraint_name.clone())
-            .or_insert_with(|| FkAccumulator {
-                columns: Vec::new(),
-                ref_schema: row.ref_schema.clone(),
-                ref_table: row.ref_table.clone(),
-                ref_columns: Vec::new(),
-                update_rule: row.update_rule.clone(),
-                delete_rule: row.delete_rule.clone(),
-            });
-        if !acc.columns.contains(&row.column_name) {
-            acc.columns.push(row.column_name);
+    constraints.extend(foreign_key_constraints(fk_rows.into_iter().map(|row| {
+        ForeignKeyColumn {
+            constraint_name: row.constraint_name,
+            column: row.column_name,
+            ref_schema: row.ref_schema,
+            ref_table: row.ref_table,
+            ref_column: row.ref_column,
+            update_rule: row.update_rule,
+            delete_rule: row.delete_rule,
         }
-        if !acc.ref_columns.contains(&row.ref_column) {
-            acc.ref_columns.push(row.ref_column);
-        }
-    }
-    for (name, acc) in fk_map {
-        constraints.push(ConstraintInfo::foreign_key(
-            name,
-            acc.columns,
-            ForeignKeyInfo::new(
-                acc.ref_schema,
-                acc.ref_table,
-                acc.ref_columns,
-                acc.update_rule,
-                acc.delete_rule,
-            ),
-        ));
-    }
+    })));
 
     // Unique constraints
     let uq_rows = sqlx::query_as::<_, UqRow>(
@@ -119,16 +90,9 @@ pub async fn query_constraints(
     .fetch_all(pool)
     .await?;
 
-    let mut uq_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for row in uq_rows {
-        uq_map
-            .entry(row.constraint_name)
-            .or_default()
-            .push(row.column_name);
-    }
-    for (name, columns) in uq_map {
-        constraints.push(ConstraintInfo::unique(name, columns));
-    }
+    constraints.extend(unique_constraints(uq_rows, |row| {
+        (row.constraint_name, row.column_name)
+    }));
 
     // CHECK constraints. pg_constraint.contype='c' is the catalog-side filter;
     // pg_get_constraintdef returns a readable predicate string like
@@ -202,15 +166,6 @@ fn strip_check_wrapper(def: &str) -> String {
         }
     }
     trimmed
-}
-
-struct FkAccumulator {
-    columns: Vec<String>,
-    ref_schema: String,
-    ref_table: String,
-    ref_columns: Vec<String>,
-    update_rule: String,
-    delete_rule: String,
 }
 
 #[derive(sqlx::FromRow)]

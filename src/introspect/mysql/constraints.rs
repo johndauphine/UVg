@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
-
 use sqlx::MySqlPool;
 
 use crate::error::UvgError;
-use crate::schema::{ConstraintInfo, ConstraintType, ForeignKeyInfo};
+use crate::introspect::grouping::{
+    foreign_key_constraints, typed_column_constraints, ForeignKeyColumn,
+};
+use crate::schema::{ConstraintInfo, ConstraintType};
 
 pub async fn query_constraints(
     pool: &MySqlPool,
@@ -36,26 +37,14 @@ pub async fn query_constraints(
     .fetch_all(pool)
     .await?;
 
-    let mut pk_uq_map: BTreeMap<String, (ConstraintType, Vec<String>)> = BTreeMap::new();
-    for row in pk_uq_rows {
-        let ct = match row.constraint_type.as_str() {
+    constraints.extend(typed_column_constraints(pk_uq_rows, |row| {
+        let constraint_type = match row.constraint_type.as_str() {
             "PRIMARY KEY" => ConstraintType::PrimaryKey,
             "UNIQUE" => ConstraintType::Unique,
-            _ => continue,
+            _ => return None,
         };
-        pk_uq_map
-            .entry(row.constraint_name)
-            .or_insert_with(|| (ct, Vec::new()))
-            .1
-            .push(row.column_name);
-    }
-    for (name, (ct, columns)) in pk_uq_map {
-        constraints.push(match ct {
-            ConstraintType::PrimaryKey => ConstraintInfo::primary_key(name, columns),
-            ConstraintType::Unique => ConstraintInfo::unique(name, columns),
-            _ => continue,
-        });
-    }
+        Some((row.constraint_name, constraint_type, row.column_name))
+    }));
 
     // Foreign keys
     let fk_rows = sqlx::query_as::<_, FkRow>(
@@ -83,38 +72,17 @@ pub async fn query_constraints(
     .fetch_all(pool)
     .await?;
 
-    let mut fk_map: BTreeMap<String, FkAccumulator> = BTreeMap::new();
-    for row in fk_rows {
-        let acc = fk_map
-            .entry(row.constraint_name.clone())
-            .or_insert_with(|| FkAccumulator {
-                columns: Vec::new(),
-                ref_schema: row.ref_schema.clone(),
-                ref_table: row.ref_table.clone(),
-                ref_columns: Vec::new(),
-                update_rule: row.update_rule.clone(),
-                delete_rule: row.delete_rule.clone(),
-            });
-        if !acc.columns.contains(&row.column_name) {
-            acc.columns.push(row.column_name);
+    constraints.extend(foreign_key_constraints(fk_rows.into_iter().map(|row| {
+        ForeignKeyColumn {
+            constraint_name: row.constraint_name,
+            column: row.column_name,
+            ref_schema: row.ref_schema,
+            ref_table: row.ref_table,
+            ref_column: row.ref_column,
+            update_rule: row.update_rule,
+            delete_rule: row.delete_rule,
         }
-        if !acc.ref_columns.contains(&row.ref_column) {
-            acc.ref_columns.push(row.ref_column);
-        }
-    }
-    for (name, acc) in fk_map {
-        constraints.push(ConstraintInfo::foreign_key(
-            name,
-            acc.columns,
-            ForeignKeyInfo::new(
-                acc.ref_schema,
-                acc.ref_table,
-                acc.ref_columns,
-                acc.update_rule,
-                acc.delete_rule,
-            ),
-        ));
-    }
+    })));
 
     // Check constraints (MySQL 8.0+; older versions lack CHECK_CONSTRAINTS table)
     let check_rows = match sqlx::query_as::<_, CheckRow>(
@@ -223,15 +191,6 @@ fn normalize_mysql_check_clause(clause: &str) -> String {
     }
     out.push_str(&dequoted[last_copied..]);
     out
-}
-
-struct FkAccumulator {
-    columns: Vec<String>,
-    ref_schema: String,
-    ref_table: String,
-    ref_columns: Vec<String>,
-    update_rule: String,
-    delete_rule: String,
 }
 
 #[derive(sqlx::FromRow)]
