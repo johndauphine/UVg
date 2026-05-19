@@ -58,12 +58,10 @@ pub async fn query_constraints(
     }
 
     for (name, (ctype, columns)) in pk_uq_map {
-        constraints.push(ConstraintInfo {
-            name,
-            constraint_type: ctype,
-            columns,
-            foreign_key: None,
-            check_expression: None,
+        constraints.push(match ctype {
+            ConstraintType::PrimaryKey => ConstraintInfo::primary_key(name, columns),
+            ConstraintType::Unique => ConstraintInfo::unique(name, columns),
+            _ => continue,
         });
     }
 
@@ -124,19 +122,17 @@ pub async fn query_constraints(
     }
 
     for (name, acc) in fk_map {
-        constraints.push(ConstraintInfo {
+        constraints.push(ConstraintInfo::foreign_key(
             name,
-            constraint_type: ConstraintType::ForeignKey,
-            columns: acc.columns,
-            foreign_key: Some(ForeignKeyInfo {
-                ref_schema: acc.ref_schema,
-                ref_table: acc.ref_table,
-                ref_columns: acc.ref_columns,
-                update_rule: acc.update_rule,
-                delete_rule: acc.delete_rule,
-            }),
-            check_expression: None,
-        });
+            acc.columns,
+            ForeignKeyInfo::new(
+                acc.ref_schema,
+                acc.ref_table,
+                acc.ref_columns,
+                acc.update_rule,
+                acc.delete_rule,
+            ),
+        ));
     }
 
     // CHECK constraints via sys.check_constraints. The `definition` column
@@ -167,13 +163,7 @@ pub async fn query_constraints(
         if name.is_empty() || predicate.is_empty() {
             continue;
         }
-        constraints.push(ConstraintInfo {
-            name,
-            constraint_type: ConstraintType::Check,
-            columns: vec![],
-            foreign_key: None,
-            check_expression: Some(predicate),
-        });
+        constraints.push(ConstraintInfo::check(name, predicate));
     }
 
     Ok(constraints)

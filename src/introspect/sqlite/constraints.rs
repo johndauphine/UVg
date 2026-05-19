@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use sqlx::SqlitePool;
 
 use crate::error::UvgError;
-use crate::schema::{ConstraintInfo, ConstraintType, ForeignKeyInfo};
+use crate::schema::{ConstraintInfo, ForeignKeyInfo};
 
 pub async fn query_constraints(
     pool: &SqlitePool,
@@ -15,13 +15,10 @@ pub async fn query_constraints(
     // Primary key — from pragma_table_info
     let pk_cols = query_primary_key(pool, table_name).await?;
     if !pk_cols.is_empty() {
-        constraints.push(ConstraintInfo {
-            name: format!("pk_{table_name}"),
-            constraint_type: ConstraintType::PrimaryKey,
-            columns: pk_cols,
-            foreign_key: None,
-            check_expression: None,
-        });
+        constraints.push(ConstraintInfo::primary_key(
+            format!("pk_{table_name}"),
+            pk_cols,
+        ));
     }
 
     // Foreign keys — from pragma_foreign_key_list
@@ -82,19 +79,17 @@ async fn query_foreign_keys(
         .into_iter()
         .map(|(id, acc)| {
             let name = format!("fk_{table_name}_{id}");
-            ConstraintInfo {
+            ConstraintInfo::foreign_key(
                 name,
-                constraint_type: ConstraintType::ForeignKey,
-                columns: acc.columns,
-                foreign_key: Some(ForeignKeyInfo {
-                    ref_schema: "main".to_string(),
-                    ref_table: acc.ref_table,
-                    ref_columns: acc.ref_columns,
-                    update_rule: acc.update_rule,
-                    delete_rule: acc.delete_rule,
-                }),
-                check_expression: None,
-            }
+                acc.columns,
+                ForeignKeyInfo::new(
+                    "main",
+                    acc.ref_table,
+                    acc.ref_columns,
+                    acc.update_rule,
+                    acc.delete_rule,
+                ),
+            )
         })
         .collect();
 
@@ -133,13 +128,7 @@ async fn query_unique_constraints(
         .await?;
 
         let columns: Vec<String> = col_rows.into_iter().map(|r| r.name).collect();
-        constraints.push(ConstraintInfo {
-            name: idx.name,
-            constraint_type: ConstraintType::Unique,
-            columns,
-            foreign_key: None,
-            check_expression: None,
-        });
+        constraints.push(ConstraintInfo::unique(idx.name, columns));
     }
 
     Ok(constraints)
@@ -173,13 +162,7 @@ fn parse_check_constraints(create_sql: &str) -> Vec<ConstraintInfo> {
             if after_check.starts_with('(') {
                 if let Some(expr) = extract_check_expression(after_check) {
                     let name = format!("ck_{idx}");
-                    checks.push(ConstraintInfo {
-                        name,
-                        constraint_type: ConstraintType::Check,
-                        columns: vec![],
-                        foreign_key: None,
-                        check_expression: Some(expr),
-                    });
+                    checks.push(ConstraintInfo::check(name, expr));
                     idx += 1;
                 }
             }

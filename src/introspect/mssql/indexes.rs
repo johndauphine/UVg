@@ -47,12 +47,7 @@ pub async fn query_indexes(
 
     let indexes = index_map
         .into_iter()
-        .map(|(name, (is_unique, columns))| IndexInfo {
-            name,
-            is_unique,
-            columns,
-            kwargs: std::collections::BTreeMap::new(),
-        })
+        .map(|(name, (is_unique, columns))| IndexInfo::new(name, is_unique, columns))
         .collect();
 
     Ok(indexes)

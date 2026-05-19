@@ -22,11 +22,6 @@ pub async fn query_columns(
             let has_autoincrement = row.pk > 0 && detect_autoincrement(create_sql, &row.name);
 
             ColumnInfo {
-                name: row.name,
-                ordinal_position: row.cid + 1, // SQLite cid is 0-based, convert to 1-based
-                is_nullable: row.notnull == 0,
-                data_type: row.type_name.clone(),
-                udt_name: base_type,
                 character_maximum_length: max_len,
                 numeric_precision: precision,
                 numeric_scale: scale,
@@ -37,6 +32,13 @@ pub async fn query_columns(
                 comment: None, // SQLite has no column comments
                 collation: None,
                 autoincrement: if has_autoincrement { Some(true) } else { None },
+                ..ColumnInfo::new(
+                    row.name,
+                    row.cid + 1, // SQLite cid is 0-based, convert to 1-based
+                    row.notnull == 0,
+                    row.type_name,
+                    base_type,
+                )
             }
         })
         .collect();

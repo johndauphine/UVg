@@ -37,15 +37,10 @@ pub async fn query_tables(
                 }
                 _ => return None,
             };
-            Some(TableInfo {
-                schema: row.table_schema,
-                name: row.table_name,
-                table_type,
-                comment: row.comment,
-                columns: Vec::new(),
-                constraints: Vec::new(),
-                indexes: Vec::new(),
-            })
+            Some(
+                TableInfo::new(row.table_schema, row.table_name, table_type)
+                    .with_comment(row.comment),
+            )
         })
         .collect();
 

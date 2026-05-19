@@ -44,13 +44,6 @@ pub async fn query_columns(
             };
 
             ColumnInfo {
-                name: row.column_name,
-                ordinal_position: row.ordinal_position as i32,
-                is_nullable: row.is_nullable,
-                // Store COLUMN_TYPE (e.g. "int unsigned", "enum('a','b')") for type mapper
-                data_type: row.column_type,
-                // Store DATA_TYPE (base type name) for matching
-                udt_name: row.data_type.to_lowercase(),
                 character_maximum_length: row.character_maximum_length.map(|v| v as i32),
                 numeric_precision: row.numeric_precision.map(|v| v as i32),
                 numeric_scale: row.numeric_scale.map(|v| v as i32),
@@ -61,6 +54,15 @@ pub async fn query_columns(
                 comment,
                 collation: row.collation_name,
                 autoincrement: if is_auto_increment { Some(true) } else { None },
+                ..ColumnInfo::new(
+                    row.column_name,
+                    row.ordinal_position as i32,
+                    row.is_nullable,
+                    // Store COLUMN_TYPE (e.g. "int unsigned", "enum('a','b')") for type mapper
+                    row.column_type,
+                    // Store DATA_TYPE (base type name) for matching
+                    row.data_type.to_lowercase(),
+                )
             }
         })
         .collect();

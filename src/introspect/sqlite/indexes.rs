@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use sqlx::SqlitePool;
 
 use crate::error::UvgError;
@@ -32,12 +30,7 @@ pub async fn query_indexes(
             // Purely expression-based index — skip entirely
             continue;
         }
-        indexes.push(IndexInfo {
-            name: idx.name,
-            is_unique: idx.unique,
-            columns,
-            kwargs: BTreeMap::new(),
-        });
+        indexes.push(IndexInfo::new(idx.name, idx.unique, columns));
     }
 
     Ok(indexes)

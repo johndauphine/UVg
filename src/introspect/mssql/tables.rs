@@ -43,15 +43,14 @@ pub async fn query_tables(
             _ => continue,
         };
 
-        tables.push(TableInfo {
-            schema: row.get::<&str, _>("TABLE_SCHEMA").unwrap_or("").to_string(),
-            name: row.get::<&str, _>("TABLE_NAME").unwrap_or("").to_string(),
-            table_type,
-            comment: row.get::<&str, _>("comment").map(|s| s.to_string()),
-            columns: Vec::new(),
-            constraints: Vec::new(),
-            indexes: Vec::new(),
-        });
+        tables.push(
+            TableInfo::new(
+                row.get::<&str, _>("TABLE_SCHEMA").unwrap_or(""),
+                row.get::<&str, _>("TABLE_NAME").unwrap_or(""),
+                table_type,
+            )
+            .with_comment(row.get::<&str, _>("comment")),
+        );
     }
 
     Ok(tables)

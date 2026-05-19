@@ -36,11 +36,6 @@ pub async fn query_columns(
             None
         };
         columns.push(ColumnInfo {
-            name: row.column_name,
-            ordinal_position: row.ordinal_position,
-            is_nullable: row.is_nullable,
-            data_type: row.data_type,
-            udt_name: row.udt_name,
             character_maximum_length: row.character_maximum_length,
             numeric_precision: row.numeric_precision,
             numeric_scale: row.numeric_scale,
@@ -49,8 +44,13 @@ pub async fn query_columns(
             identity_generation: row.identity_generation,
             identity,
             comment: row.comment,
-            collation: None,
-            autoincrement: None,
+            ..ColumnInfo::new(
+                row.column_name,
+                row.ordinal_position,
+                row.is_nullable,
+                row.data_type,
+                row.udt_name,
+            )
         });
     }
 
@@ -78,13 +78,15 @@ async fn query_identity_info(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| IdentityInfo {
-        start: r.seqstart,
-        increment: r.seqincrement,
-        min_value: r.seqmin,
-        max_value: r.seqmax,
-        cycle: r.seqcycle,
-        cache: r.seqcache,
+    Ok(row.map(|r| {
+        IdentityInfo::new(
+            r.seqstart,
+            r.seqincrement,
+            r.seqmin,
+            r.seqmax,
+            r.seqcycle,
+            r.seqcache,
+        )
     }))
 }
 

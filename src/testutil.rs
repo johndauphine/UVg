@@ -4,23 +4,7 @@ use crate::schema::*;
 /// Create a ColumnInfo with sensible defaults for testing.
 /// Returns a non-nullable int4 column with no defaults, no identity, and no comment.
 pub fn test_column(name: &str) -> ColumnInfo {
-    ColumnInfo {
-        name: name.to_string(),
-        ordinal_position: 1,
-        is_nullable: false,
-        data_type: String::new(),
-        udt_name: "int4".to_string(),
-        character_maximum_length: None,
-        numeric_precision: None,
-        numeric_scale: None,
-        column_default: None,
-        is_identity: false,
-        identity_generation: None,
-        identity: None,
-        comment: None,
-        collation: None,
-        autoincrement: None,
-    }
+    ColumnInfo::new(name, 1, false, "", "int4")
 }
 
 /// Builder for constructing ColumnInfo in tests.
@@ -110,15 +94,7 @@ pub struct TableInfoBuilder {
 impl TableInfoBuilder {
     pub fn new(name: &str) -> Self {
         Self {
-            inner: TableInfo {
-                schema: "public".to_string(),
-                name: name.to_string(),
-                table_type: TableType::Table,
-                comment: None,
-                columns: vec![],
-                constraints: vec![],
-                indexes: vec![],
-            },
+            inner: TableInfo::new("public", name, TableType::Table),
             next_ordinal: 1,
         }
     }
@@ -136,24 +112,16 @@ impl TableInfoBuilder {
     }
 
     pub fn pk(mut self, name: &str, cols: &[&str]) -> Self {
-        self.inner.constraints.push(ConstraintInfo {
-            name: name.to_string(),
-            constraint_type: ConstraintType::PrimaryKey,
-            columns: cols.iter().map(|s| s.to_string()).collect(),
-            foreign_key: None,
-            check_expression: None,
-        });
+        self.inner
+            .constraints
+            .push(ConstraintInfo::primary_key(name, cols.iter().copied()));
         self
     }
 
     pub fn unique(mut self, name: &str, cols: &[&str]) -> Self {
-        self.inner.constraints.push(ConstraintInfo {
-            name: name.to_string(),
-            constraint_type: ConstraintType::Unique,
-            columns: cols.iter().map(|s| s.to_string()).collect(),
-            foreign_key: None,
-            check_expression: None,
-        });
+        self.inner
+            .constraints
+            .push(ConstraintInfo::unique(name, cols.iter().copied()));
         self
     }
 
@@ -164,19 +132,17 @@ impl TableInfoBuilder {
         ref_table: &str,
         ref_cols: &[&str],
     ) -> Self {
-        self.inner.constraints.push(ConstraintInfo {
-            name: name.to_string(),
-            constraint_type: ConstraintType::ForeignKey,
-            columns: local_cols.iter().map(|s| s.to_string()).collect(),
-            foreign_key: Some(ForeignKeyInfo {
-                ref_schema: "public".to_string(),
-                ref_table: ref_table.to_string(),
-                ref_columns: ref_cols.iter().map(|s| s.to_string()).collect(),
-                update_rule: "NO ACTION".to_string(),
-                delete_rule: "NO ACTION".to_string(),
-            }),
-            check_expression: None,
-        });
+        self.inner.constraints.push(ConstraintInfo::foreign_key(
+            name,
+            local_cols.iter().copied(),
+            ForeignKeyInfo::new(
+                "public",
+                ref_table,
+                ref_cols.iter().copied(),
+                "NO ACTION",
+                "NO ACTION",
+            ),
+        ));
         self
     }
 
@@ -191,40 +157,31 @@ impl TableInfoBuilder {
         update_rule: &str,
         delete_rule: &str,
     ) -> Self {
-        self.inner.constraints.push(ConstraintInfo {
-            name: name.to_string(),
-            constraint_type: ConstraintType::ForeignKey,
-            columns: local_cols.iter().map(|s| s.to_string()).collect(),
-            foreign_key: Some(ForeignKeyInfo {
-                ref_schema: ref_schema.to_string(),
-                ref_table: ref_table.to_string(),
-                ref_columns: ref_cols.iter().map(|s| s.to_string()).collect(),
-                update_rule: update_rule.to_string(),
-                delete_rule: delete_rule.to_string(),
-            }),
-            check_expression: None,
-        });
+        self.inner.constraints.push(ConstraintInfo::foreign_key(
+            name,
+            local_cols.iter().copied(),
+            ForeignKeyInfo::new(
+                ref_schema,
+                ref_table,
+                ref_cols.iter().copied(),
+                update_rule,
+                delete_rule,
+            ),
+        ));
         self
     }
 
     pub fn check(mut self, name: &str, expression: &str) -> Self {
-        self.inner.constraints.push(ConstraintInfo {
-            name: name.to_string(),
-            constraint_type: ConstraintType::Check,
-            columns: vec![],
-            foreign_key: None,
-            check_expression: Some(expression.to_string()),
-        });
+        self.inner
+            .constraints
+            .push(ConstraintInfo::check(name, expression));
         self
     }
 
     pub fn index(mut self, name: &str, cols: &[&str], unique: bool) -> Self {
-        self.inner.indexes.push(IndexInfo {
-            name: name.to_string(),
-            is_unique: unique,
-            columns: cols.iter().map(|s| s.to_string()).collect(),
-            kwargs: std::collections::BTreeMap::new(),
-        });
+        self.inner
+            .indexes
+            .push(IndexInfo::new(name, unique, cols.iter().copied()));
         self
     }
 
@@ -235,15 +192,12 @@ impl TableInfoBuilder {
         unique: bool,
         kwargs: &[(&str, &str)],
     ) -> Self {
-        self.inner.indexes.push(IndexInfo {
-            name: name.to_string(),
-            is_unique: unique,
-            columns: cols.iter().map(|s| s.to_string()).collect(),
-            kwargs: kwargs
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        });
+        let mut index = IndexInfo::new(name, unique, cols.iter().copied());
+        index.kwargs = kwargs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        self.inner.indexes.push(index);
         self
     }
 

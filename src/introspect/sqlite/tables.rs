@@ -29,15 +29,7 @@ pub async fn query_tables(pool: &SqlitePool, noviews: bool) -> Result<Vec<TableI
                 }
                 _ => return None,
             };
-            Some(TableInfo {
-                schema: "main".to_string(),
-                name: row.name,
-                table_type,
-                comment: None, // SQLite has no table comments
-                columns: Vec::new(),
-                constraints: Vec::new(),
-                indexes: Vec::new(),
-            })
+            Some(TableInfo::new("main", row.name, table_type))
         })
         .collect();
 

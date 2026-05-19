@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
-
 use sqlx::MySqlPool;
+use std::collections::BTreeMap;
 
 use crate::error::UvgError;
 use crate::schema::IndexInfo;
@@ -45,12 +44,7 @@ pub async fn query_indexes(
     let indexes = index_map
         .into_iter()
         .filter(|(_, (_, cols))| !cols.is_empty())
-        .map(|(name, (is_unique, columns))| IndexInfo {
-            name,
-            is_unique,
-            columns,
-            kwargs: BTreeMap::new(),
-        })
+        .map(|(name, (is_unique, columns))| IndexInfo::new(name, is_unique, columns))
         .collect();
 
     Ok(indexes)

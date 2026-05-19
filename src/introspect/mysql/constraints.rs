@@ -50,12 +50,10 @@ pub async fn query_constraints(
             .push(row.column_name);
     }
     for (name, (ct, columns)) in pk_uq_map {
-        constraints.push(ConstraintInfo {
-            name,
-            constraint_type: ct,
-            columns,
-            foreign_key: None,
-            check_expression: None,
+        constraints.push(match ct {
+            ConstraintType::PrimaryKey => ConstraintInfo::primary_key(name, columns),
+            ConstraintType::Unique => ConstraintInfo::unique(name, columns),
+            _ => continue,
         });
     }
 
@@ -105,19 +103,17 @@ pub async fn query_constraints(
         }
     }
     for (name, acc) in fk_map {
-        constraints.push(ConstraintInfo {
+        constraints.push(ConstraintInfo::foreign_key(
             name,
-            constraint_type: ConstraintType::ForeignKey,
-            columns: acc.columns,
-            foreign_key: Some(ForeignKeyInfo {
-                ref_schema: acc.ref_schema,
-                ref_table: acc.ref_table,
-                ref_columns: acc.ref_columns,
-                update_rule: acc.update_rule,
-                delete_rule: acc.delete_rule,
-            }),
-            check_expression: None,
-        });
+            acc.columns,
+            ForeignKeyInfo::new(
+                acc.ref_schema,
+                acc.ref_table,
+                acc.ref_columns,
+                acc.update_rule,
+                acc.delete_rule,
+            ),
+        ));
     }
 
     // Check constraints (MySQL 8.0+; older versions lack CHECK_CONSTRAINTS table)
@@ -162,13 +158,10 @@ pub async fn query_constraints(
     };
 
     for row in check_rows {
-        constraints.push(ConstraintInfo {
-            name: row.constraint_name,
-            constraint_type: ConstraintType::Check,
-            columns: vec![],
-            foreign_key: None,
-            check_expression: Some(normalize_mysql_check_clause(&row.check_clause)),
-        });
+        constraints.push(ConstraintInfo::check(
+            row.constraint_name,
+            normalize_mysql_check_clause(&row.check_clause),
+        ));
     }
 
     Ok(constraints)

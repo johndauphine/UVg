@@ -61,24 +61,12 @@ pub async fn query_columns(
         let identity = if is_identity {
             let seed: i64 = row.get::<i64, _>("seed_value").unwrap_or(1);
             let incr: i64 = row.get::<i64, _>("increment_value").unwrap_or(1);
-            Some(IdentityInfo {
-                start: seed,
-                increment: incr,
-                min_value: 0,
-                max_value: 0,
-                cycle: false,
-                cache: 0,
-            })
+            Some(IdentityInfo::new(seed, incr, 0, 0, false, 0))
         } else {
             None
         };
 
         columns.push(ColumnInfo {
-            name: row.get::<&str, _>("COLUMN_NAME").unwrap_or("").to_string(),
-            ordinal_position: row.get::<i32, _>("ORDINAL_POSITION").unwrap_or(0),
-            is_nullable: row.get::<i32, _>("is_nullable").unwrap_or(0) == 1,
-            data_type: data_type.clone(),
-            udt_name: data_type,
             character_maximum_length,
             numeric_precision,
             numeric_scale,
@@ -92,7 +80,13 @@ pub async fn query_columns(
             identity,
             comment: row.get::<&str, _>("comment").map(|s| s.to_string()),
             collation: row.get::<&str, _>("COLLATION_NAME").map(|s| s.to_string()),
-            autoincrement: None,
+            ..ColumnInfo::new(
+                row.get::<&str, _>("COLUMN_NAME").unwrap_or(""),
+                row.get::<i32, _>("ORDINAL_POSITION").unwrap_or(0),
+                row.get::<i32, _>("is_nullable").unwrap_or(0) == 1,
+                data_type.clone(),
+                data_type,
+            )
         });
     }
 

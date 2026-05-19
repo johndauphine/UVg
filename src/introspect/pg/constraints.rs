@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use sqlx::PgPool;
 
 use crate::error::UvgError;
-use crate::schema::{ConstraintInfo, ConstraintType, ForeignKeyInfo};
+use crate::schema::{ConstraintInfo, ForeignKeyInfo};
 
 pub async fn query_constraints(
     pool: &PgPool,
@@ -38,13 +38,7 @@ pub async fn query_constraints(
             .push(row.column_name);
     }
     for (name, columns) in pk_map {
-        constraints.push(ConstraintInfo {
-            name,
-            constraint_type: ConstraintType::PrimaryKey,
-            columns,
-            foreign_key: None,
-            check_expression: None,
-        });
+        constraints.push(ConstraintInfo::primary_key(name, columns));
     }
 
     // Foreign keys
@@ -95,19 +89,17 @@ pub async fn query_constraints(
         }
     }
     for (name, acc) in fk_map {
-        constraints.push(ConstraintInfo {
+        constraints.push(ConstraintInfo::foreign_key(
             name,
-            constraint_type: ConstraintType::ForeignKey,
-            columns: acc.columns,
-            foreign_key: Some(ForeignKeyInfo {
-                ref_schema: acc.ref_schema,
-                ref_table: acc.ref_table,
-                ref_columns: acc.ref_columns,
-                update_rule: acc.update_rule,
-                delete_rule: acc.delete_rule,
-            }),
-            check_expression: None,
-        });
+            acc.columns,
+            ForeignKeyInfo::new(
+                acc.ref_schema,
+                acc.ref_table,
+                acc.ref_columns,
+                acc.update_rule,
+                acc.delete_rule,
+            ),
+        ));
     }
 
     // Unique constraints
@@ -135,13 +127,7 @@ pub async fn query_constraints(
             .push(row.column_name);
     }
     for (name, columns) in uq_map {
-        constraints.push(ConstraintInfo {
-            name,
-            constraint_type: ConstraintType::Unique,
-            columns,
-            foreign_key: None,
-            check_expression: None,
-        });
+        constraints.push(ConstraintInfo::unique(name, columns));
     }
 
     // CHECK constraints. pg_constraint.contype='c' is the catalog-side filter;
@@ -172,13 +158,7 @@ pub async fn query_constraints(
         // emitter doesn't double-wrap. Also strip any leading "NOT VALID"
         // suffix which constraint metadata can carry but isn't predicate.
         let predicate = strip_check_wrapper(&row.predicate);
-        constraints.push(ConstraintInfo {
-            name: row.constraint_name,
-            constraint_type: ConstraintType::Check,
-            columns: vec![],
-            foreign_key: None,
-            check_expression: Some(predicate),
-        });
+        constraints.push(ConstraintInfo::check(row.constraint_name, predicate));
     }
 
     Ok(constraints)
