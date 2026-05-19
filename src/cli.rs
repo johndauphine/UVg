@@ -177,13 +177,15 @@ fn ensure_mysql_charset(url: &str) -> String {
 }
 
 impl Cli {
-    /// Parse the comma-delimited --tables flag into a Vec of table names.
-    /// Empty / missing flag → empty vec. Used by `table_filter()`.
+    /// Parse the comma-delimited --tables flag into a Vec of glob patterns.
+    /// Bare names with no metacharacters degenerate to exact-match (back-compat
+    /// with the original exact-name behavior). Empty / missing flag → empty vec.
     pub fn table_list(&self) -> Vec<String> {
         split_csv(self.tables.as_deref())
     }
 
-    /// Parse the comma-delimited --exclude-tables flag.
+    /// Parse the comma-delimited --exclude-tables flag into a Vec of glob
+    /// patterns. Same syntax and degeneration rule as `table_list`.
     pub fn exclude_table_list(&self) -> Vec<String> {
         split_csv(self.exclude_tables.as_deref())
     }

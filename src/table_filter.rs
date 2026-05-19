@@ -16,7 +16,7 @@ use crate::error::UvgError;
 
 /// Decision oracle: "should this table name be introspected?"
 #[derive(Debug, Default)]
-pub struct TableFilter {
+pub(crate) struct TableFilter {
     includes: Vec<Pattern>,
     excludes: Vec<Pattern>,
 }
@@ -25,7 +25,7 @@ impl TableFilter {
     /// Parse and validate `--tables` and `--exclude-tables` patterns.
     /// Returns `Err` on the first malformed pattern so the user sees the
     /// problem before any DB connection is opened.
-    pub fn new(includes: &[String], excludes: &[String]) -> Result<Self, UvgError> {
+    pub(crate) fn new(includes: &[String], excludes: &[String]) -> Result<Self, UvgError> {
         Ok(Self {
             includes: parse_patterns(includes, "tables")?,
             excludes: parse_patterns(excludes, "exclude-tables")?,
@@ -33,14 +33,14 @@ impl TableFilter {
     }
 
     /// Convenience constructor for the empty filter (matches everything).
-    pub fn allow_all() -> Self {
+    pub(crate) fn allow_all() -> Self {
         Self::default()
     }
 
     /// `true` when the table should be introspected. Empty `includes`
     /// means "all"; any include match qualifies; any exclude match
     /// disqualifies. Exclude wins over include.
-    pub fn matches(&self, name: &str) -> bool {
+    pub(crate) fn matches(&self, name: &str) -> bool {
         let included = self.includes.is_empty()
             || self.includes.iter().any(|p| p.matches(name));
         if !included {
@@ -145,6 +145,17 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("tables"), "expected flag name in error: {msg}");
         assert!(msg.contains("[unclosed"), "expected pattern in error: {msg}");
+    }
+
+    #[test]
+    fn metacharacters_in_real_table_names_can_be_escaped() {
+        // A table literally named `users_*` (yes, MySQL/PG allow it with
+        // quoting) can be matched by escaping the `*` as `[*]` per glob
+        // syntax. Documents the escape path for the rare case where a real
+        // identifier contains a glob metacharacter.
+        let f = TableFilter::new(&s(&["users_[*]"]), &s(&[])).unwrap();
+        assert!(f.matches("users_*"));
+        assert!(!f.matches("users_active"));
     }
 
     #[test]
