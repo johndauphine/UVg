@@ -289,45 +289,63 @@ fn write_split_output(files: &[(String, String)], outfile: &Option<String>) -> a
     Ok(())
 }
 
+/// Strip userinfo from a connection URL before it lands in a stderr
+/// message. Database URLs commonly carry credentials in the
+/// `scheme://user:pass@host/db` form; emitting them verbatim leaks
+/// secrets into CI logs and terminal scrollback. Best-effort: a URL
+/// the `url` crate can't parse (e.g. `sqlite:relative/path`) is
+/// returned unchanged, since those forms don't carry credentials.
+fn redact_target_url(raw: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return raw.to_string();
+    }
+    let _ = parsed.set_username("***");
+    let _ = parsed.set_password(None);
+    parsed.into()
+}
+
 /// Apply a freshly-rendered diff (single SQL blob) against `config`.
 /// Empty diffs report "no schema changes" and succeed; first failed
-/// statement bubbles up as a non-zero exit.
+/// statement bubbles up as a non-zero exit. `target_url` is redacted
+/// before being printed.
 async fn apply_inline(
     config: &ConnectionConfig,
     content: &str,
-    target_label: &str,
+    target_url: &str,
 ) -> Result<()> {
     let results = db::execute_ddl(config, content).await?;
     if results.is_empty() {
         eprintln!("uvg: no schema changes");
         return Ok(());
     }
+    let label = redact_target_url(target_url);
     let applied = results.iter().take_while(|r| r.error.is_none()).count();
     if let Some(failed) = results.iter().find(|r| r.error.is_some()) {
         return Err(anyhow::anyhow!(
             "uvg: apply failed on statement {}/{} against {}: {}\n--- SQL ---\n{}",
             applied + 1,
             results.len(),
-            target_label,
+            label,
             failed.error.as_deref().unwrap_or(""),
             failed.sql,
         ));
     }
-    eprintln!(
-        "uvg: applied {} statement(s) to {}",
-        applied, target_label
-    );
+    eprintln!("uvg: applied {} statement(s) to {}", applied, label);
     Ok(())
 }
 
 /// Apply a manifest's per-table files in `apply_order` (schema-scoped
 /// first, then tables in topo order). Each file is parsed and executed
 /// independently so the error message can pinpoint which file failed.
+/// `target_url` is redacted before being printed.
 async fn apply_manifest(
     config: &ConnectionConfig,
     manifest: &Manifest,
     out_dir: &std::path::Path,
-    target_label: &str,
+    target_url: &str,
 ) -> Result<()> {
     let paths = apply_order(manifest, out_dir);
     let mut total_applied = 0usize;
@@ -351,9 +369,56 @@ async fn apply_manifest(
         "uvg: applied {} statement(s) across {} file(s) to {}",
         total_applied,
         paths.len(),
-        target_label,
+        redact_target_url(target_url),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_target_url;
+
+    #[test]
+    fn test_redact_target_url_strips_password() {
+        assert_eq!(
+            redact_target_url("postgres://alice:hunter2@db.example.com:5432/orders"),
+            "postgres://***@db.example.com:5432/orders",
+        );
+    }
+
+    #[test]
+    fn test_redact_target_url_strips_username_only() {
+        assert_eq!(
+            redact_target_url("mysql://root@localhost/mydb"),
+            "mysql://***@localhost/mydb",
+        );
+    }
+
+    #[test]
+    fn test_redact_target_url_leaves_credential_free_urls_alone() {
+        assert_eq!(
+            redact_target_url("sqlite:///tmp/data.db"),
+            "sqlite:///tmp/data.db",
+        );
+        assert_eq!(
+            redact_target_url("postgres://db.example.com:5432/orders"),
+            "postgres://db.example.com:5432/orders",
+        );
+    }
+
+    #[test]
+    fn test_redact_target_url_passes_through_unparseable() {
+        // sqlite:relative form skips url::Url::parse — returned as-is.
+        assert_eq!(redact_target_url("sqlite:relative.db"), "sqlite:relative.db");
+    }
+
+    #[test]
+    fn test_redact_target_url_preserves_query_and_path() {
+        assert_eq!(
+            redact_target_url("mysql://u:p@host/db?charset=utf8mb4"),
+            "mysql://***@host/db?charset=utf8mb4",
+        );
+    }
 }
 
 fn write_output(output: &str, outfile: &Option<String>) -> anyhow::Result<()> {
