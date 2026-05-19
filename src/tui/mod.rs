@@ -863,6 +863,7 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
         apply: false,
         progress: crate::apply_progress::ProgressMode::Auto,
         apply_retries: 3,
+        no_parse_check: false,
         tables: None,
         exclude_tables: None,
         schemas: None,

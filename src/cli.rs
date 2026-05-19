@@ -48,6 +48,15 @@ pub struct Cli {
     #[arg(long, default_value_t = 3)]
     pub apply_retries: u8,
 
+    /// Skip the parse-check step that runs before `--apply` would
+    /// touch the target. By default uvg pre-validates every DDL
+    /// statement via the dialect's parse-only mode (PG: BEGIN/ROLLBACK
+    /// probe; MSSQL: SET PARSEONLY ON; MySQL/SQLite skipped — no
+    /// parse-only mode available) so syntax errors or missing
+    /// references surface before any real change is made.
+    #[arg(long)]
+    pub no_parse_check: bool,
+
     /// Tables to process (comma-delimited). Each item is a glob pattern
     /// (`*`, `?`, `[abc]`); bare names with no metacharacters match
     /// exactly. Default: all tables.
@@ -258,6 +267,7 @@ impl Cli {
                 apply: false,
                 progress: crate::apply_progress::ProgressMode::Auto,
                 apply_retries: 3,
+                no_parse_check: false,
                 tables: None,
                 exclude_tables: None,
                 schemas: None,
@@ -299,6 +309,7 @@ impl Cli {
             apply: false,
             progress: crate::apply_progress::ProgressMode::Auto,
             apply_retries: 3,
+            no_parse_check: false,
             tables: None,
             exclude_tables: None,
             schemas: None,
@@ -446,6 +457,7 @@ mod tests {
             apply: false,
             progress: crate::apply_progress::ProgressMode::Auto,
             apply_retries: 3,
+            no_parse_check: false,
             tables: None,
             exclude_tables: None,
             schemas: None,

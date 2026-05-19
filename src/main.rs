@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
                                     target_url,
                                     cli.progress.resolved(),
                                     cli.apply_retries,
+                                    !cli.no_parse_check,
                                 )
                                 .await?;
                             }
@@ -251,6 +252,7 @@ async fn main() -> Result<()> {
                             target_url,
                             cli.progress.resolved(),
                             cli.apply_retries,
+                            !cli.no_parse_check,
                         )
                         .await?;
                     }
@@ -323,6 +325,52 @@ fn redact_target_url(raw: &str) -> String {
     parsed.into()
 }
 
+/// Run the per-dialect parse-check probe. Aborts with all collected
+/// parse errors on any failure (not just the first) so the user can
+/// fix everything in one round. Silently skipped on dialects that
+/// don't support parse-only mode (MySQL, SQLite) — print a one-line
+/// note instead of aborting, since the apply will still surface real
+/// errors at exec time and we don't want to falsely block on dialects
+/// we just can't probe.
+async fn run_parse_check(config: &ConnectionConfig, content: &str) -> Result<()> {
+    if !db::supports_parse_check(config) {
+        eprintln!(
+            "uvg: parse-check skipped (no parse-only mode for this dialect; pass --no-parse-check to silence)"
+        );
+        return Ok(());
+    }
+    let errors = db::parse_check_ddl(config, content).await?;
+    if errors.is_empty() {
+        return Ok(());
+    }
+    // Compose a multi-line error report so every parse failure shows
+    // up at once, not just the first one. Each entry includes the
+    // SQL preview (truncated like the progress line) plus the raw
+    // dialect error.
+    let mut msg = format!(
+        "uvg: parse-check found {} error(s) before applying — fix and retry, or pass --no-parse-check to skip:\n",
+        errors.len()
+    );
+    for (i, e) in errors.iter().enumerate() {
+        let preview: String = e
+            .sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(120)
+            .collect();
+        msg.push_str(&format!(
+            "  [{}/{}] {}\n      {}\n",
+            i + 1,
+            errors.len(),
+            preview,
+            e.error,
+        ));
+    }
+    Err(anyhow::anyhow!(msg))
+}
+
 /// Apply a freshly-rendered diff (single SQL blob) against `config`.
 /// Empty diffs report "no schema changes" and succeed; first failed
 /// statement bubbles up as a non-zero exit. `target_url` is redacted
@@ -335,7 +383,11 @@ async fn apply_inline(
     target_url: &str,
     progress_enabled: bool,
     max_retries: u8,
+    parse_check: bool,
 ) -> Result<()> {
+    if parse_check {
+        run_parse_check(config, content).await?;
+    }
     let mut stats = apply_progress::ApplyStats::new();
     let results = {
         let observer = |r: &db::StmtResult, i: usize, total: usize| {
@@ -382,10 +434,22 @@ async fn apply_manifest(
     target_url: &str,
     progress_enabled: bool,
     max_retries: u8,
+    parse_check: bool,
 ) -> Result<()> {
     let paths = apply_order(manifest, out_dir);
     let mut total_applied = 0usize;
     let mut stats = apply_progress::ApplyStats::new();
+    if parse_check {
+        // Concatenate every file's contents and parse-check the whole
+        // batch in one pass. Per-statement parse errors carry the SQL
+        // text so the user can still locate the offending statement
+        // even though the file boundary is lost in the error list.
+        let combined = paths
+            .iter()
+            .map(|p| fs::read_to_string(p).map(|s| s + "\n"))
+            .collect::<std::io::Result<String>>()?;
+        run_parse_check(config, &combined).await?;
+    }
     for path in &paths {
         let content = fs::read_to_string(path)?;
         let results = {
