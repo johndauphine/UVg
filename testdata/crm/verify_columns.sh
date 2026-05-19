@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# verify_columns.sh — column-level metadata equivalence check between MSSQL
-# source and PG target after an `smt create` run. Implements pass criteria
+# verify_columns.sh — column-level metadata equivalence check between an MSSQL
+# source and PostgreSQL target after a CRM matrix run. Implements pass criteria
 # 1–6 from CLAUDE.md "Cross-engine coverage status." Criterion 7 (computed-
 # column presence + storage class) is a TODO — needs cross-dialect
 # expression normalization. Exits non-zero with a diff report on any mismatch.
@@ -9,9 +9,9 @@
 #   ./verify_columns.sh <mssql_db> <mssql_schema> <pg_db> <pg_schema> [table_filter]
 #
 # Example:
-#   ./verify_columns.sh CRM_MSSQL_TEST dbo pr37_pg_target public Companies
+#   ./verify_columns.sh CRM_MSSQL dbo uvg_matrix_mssql_to_postgres public Companies
 #
-# Assumes docker containers `mssql-bench` and `pg-bench` with default
+# Assumes docker containers `mssql-test` and `pg-test` with default
 # CRM-fixture credentials. Tweak the password / host args at the top if not.
 
 set -euo pipefail
@@ -22,16 +22,29 @@ PG_DB="${3:?missing pg db}"
 PG_SCHEMA="${4:?missing pg schema}"
 TABLE_FILTER="${5:-%}"   # SQL LIKE pattern; default = all tables
 
-MSSQL_CONTAINER="${MSSQL_CONTAINER:-mssql-bench}"
+MSSQL_CONTAINER="${MSSQL_CONTAINER:-mssql-test}"
 MSSQL_USER="${MSSQL_USER:-sa}"
 MSSQL_PASS="${MSSQL_PASS:-TestPass2024}"
 
-PG_CONTAINER="${PG_CONTAINER:-pg-bench}"
+PG_CONTAINER="${PG_CONTAINER:-pg-test}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-TestPass2024}"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+MSSQL_SQLCMD=""
+for p in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
+  if docker exec "$MSSQL_CONTAINER" test -x "$p" 2>/dev/null; then
+    MSSQL_SQLCMD="$p"
+    break
+  fi
+done
+if [[ -z "$MSSQL_SQLCMD" ]]; then
+  echo "error: sqlcmd not found inside container '$MSSQL_CONTAINER' at either" \
+    "/opt/mssql-tools18/bin/sqlcmd or /opt/mssql-tools/bin/sqlcmd" >&2
+  exit 1
+fi
 
 # --- Source extraction --------------------------------------------------------
 # Pull the metadata fields we'll compare. Lower-case the table/column names so
@@ -42,7 +55,7 @@ trap 'rm -rf "$work"' EXIT
 # compare across dialects. Only column-default presence is captured (Y/N), not
 # the expression itself — full default-expression equivalence requires a
 # dialect-aware normalizer (TODO; see CLAUDE.md criterion 6).
-docker exec "$MSSQL_CONTAINER" /opt/mssql-tools18/bin/sqlcmd \
+docker exec "$MSSQL_CONTAINER" "$MSSQL_SQLCMD" \
   -S localhost -U "$MSSQL_USER" -P "$MSSQL_PASS" -C -d "$MSSQL_DB" -h-1 -W -s '|' -Q "
 SET NOCOUNT ON;
 SELECT

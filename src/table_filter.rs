@@ -41,8 +41,7 @@ impl TableFilter {
     /// means "all"; any include match qualifies; any exclude match
     /// disqualifies. Exclude wins over include.
     pub(crate) fn matches(&self, name: &str) -> bool {
-        let included = self.includes.is_empty()
-            || self.includes.iter().any(|p| p.matches(name));
+        let included = self.includes.is_empty() || self.includes.iter().any(|p| p.matches(name));
         if !included {
             return false;
         }
@@ -144,7 +143,10 @@ mod tests {
         let err = TableFilter::new(&s(&["[unclosed"]), &s(&[])).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("tables"), "expected flag name in error: {msg}");
-        assert!(msg.contains("[unclosed"), "expected pattern in error: {msg}");
+        assert!(
+            msg.contains("[unclosed"),
+            "expected pattern in error: {msg}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
+use tiberius::Client;
 use tokio::net::TcpStream;
 use tokio_util::compat::Compat;
-use tiberius::Client;
 
 use crate::error::UvgError;
 use crate::schema::{ColumnInfo, IdentityInfo};
@@ -48,18 +48,14 @@ pub async fn query_columns(
         let is_identity_val: i32 = row.get::<i32, _>("is_identity").unwrap_or(0);
         let is_identity = is_identity_val == 1;
 
-        let data_type: String = row
-            .get::<&str, _>("DATA_TYPE")
-            .unwrap_or("")
-            .to_lowercase();
+        let data_type: String = row.get::<&str, _>("DATA_TYPE").unwrap_or("").to_lowercase();
 
         // CHARACTER_MAXIMUM_LENGTH is -1 for varchar(max)/nvarchar(max) — map to None
         let char_max_len: Option<i32> = row.get::<i32, _>("CHARACTER_MAXIMUM_LENGTH");
         let character_maximum_length = char_max_len.filter(|&n| n > 0);
 
-        let numeric_precision: Option<i32> = row
-            .get::<u8, _>("NUMERIC_PRECISION")
-            .map(|v| v as i32);
+        let numeric_precision: Option<i32> =
+            row.get::<u8, _>("NUMERIC_PRECISION").map(|v| v as i32);
         let numeric_scale: Option<i32> = row.get::<i32, _>("NUMERIC_SCALE");
 
         let identity = if is_identity {
@@ -78,10 +74,7 @@ pub async fn query_columns(
         };
 
         columns.push(ColumnInfo {
-            name: row
-                .get::<&str, _>("COLUMN_NAME")
-                .unwrap_or("")
-                .to_string(),
+            name: row.get::<&str, _>("COLUMN_NAME").unwrap_or("").to_string(),
             ordinal_position: row.get::<i32, _>("ORDINAL_POSITION").unwrap_or(0),
             is_nullable: row.get::<i32, _>("is_nullable").unwrap_or(0) == 1,
             data_type: data_type.clone(),
@@ -89,9 +82,7 @@ pub async fn query_columns(
             character_maximum_length,
             numeric_precision,
             numeric_scale,
-            column_default: row
-                .get::<&str, _>("COLUMN_DEFAULT")
-                .map(|s| s.to_string()),
+            column_default: row.get::<&str, _>("COLUMN_DEFAULT").map(|s| s.to_string()),
             is_identity,
             identity_generation: if is_identity {
                 Some("ALWAYS".to_string())
@@ -107,4 +98,3 @@ pub async fn query_columns(
 
     Ok(columns)
 }
-

@@ -219,25 +219,23 @@ async fn main() -> Result<()> {
                         .await?;
                     }
                 }
-                DdlOutput::Split(files) => {
-                    match cli.outfile {
-                        Some(ref dir) => {
-                            let dir_path = std::path::PathBuf::from(dir);
-                            fs::create_dir_all(&dir_path)?;
-                            for (filename, content) in &files {
-                                let path = dir_path.join(filename);
-                                fs::write(&path, content)?;
-                                tracing::info!("Written {}", path.display());
-                            }
-                        }
-                        None => {
-                            for (filename, content) in &files {
-                                println!("-- File: {filename}");
-                                print!("{content}\n");
-                            }
+                DdlOutput::Split(files) => match cli.outfile {
+                    Some(ref dir) => {
+                        let dir_path = std::path::PathBuf::from(dir);
+                        fs::create_dir_all(&dir_path)?;
+                        for (filename, content) in &files {
+                            let path = dir_path.join(filename);
+                            fs::write(&path, content)?;
+                            tracing::info!("Written {}", path.display());
                         }
                     }
-                }
+                    None => {
+                        for (filename, content) in &files {
+                            println!("-- File: {filename}");
+                            println!("{content}");
+                        }
+                    }
+                },
             }
         }
         other => {
@@ -520,6 +518,19 @@ async fn apply_manifest(
     Ok(())
 }
 
+fn write_output(output: &str, outfile: &Option<String>) -> anyhow::Result<()> {
+    match outfile {
+        Some(ref path) => {
+            fs::write(path, output)?;
+            tracing::info!("Output written to {path}");
+        }
+        None => {
+            print!("{output}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::redact_target_url;
@@ -555,7 +566,10 @@ mod tests {
     #[test]
     fn test_redact_target_url_passes_through_unparseable() {
         // sqlite:relative form skips url::Url::parse — returned as-is.
-        assert_eq!(redact_target_url("sqlite:relative.db"), "sqlite:relative.db");
+        assert_eq!(
+            redact_target_url("sqlite:relative.db"),
+            "sqlite:relative.db"
+        );
     }
 
     #[test]
@@ -565,17 +579,4 @@ mod tests {
             "mysql://***@host/db?charset=utf8mb4",
         );
     }
-}
-
-fn write_output(output: &str, outfile: &Option<String>) -> anyhow::Result<()> {
-    match outfile {
-        Some(ref path) => {
-            fs::write(path, output)?;
-            tracing::info!("Output written to {path}");
-        }
-        None => {
-            print!("{output}");
-        }
-    }
-    Ok(())
 }

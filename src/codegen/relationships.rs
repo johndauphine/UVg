@@ -72,7 +72,7 @@ fn count_fks_to_table(table: &TableInfo, target_table: &str) -> usize {
             c.constraint_type == ConstraintType::ForeignKey
                 && c.foreign_key
                     .as_ref()
-                    .map_or(false, |fk| fk.ref_table == target_table)
+                    .is_some_and(|fk| fk.ref_table == target_table)
         })
         .count()
 }
@@ -127,7 +127,7 @@ pub fn generate_child_relationships(
                 .columns
                 .iter()
                 .find(|c| c.name == *col_name)
-                .map_or(true, |c| c.is_nullable);
+                .is_none_or(|c| c.is_nullable);
 
             if is_selfref {
                 let reverse_name = format!("{rel_name}_reverse");
@@ -193,7 +193,7 @@ pub fn generate_child_relationships(
                     .columns
                     .iter()
                     .find(|c| c.name == *col_name)
-                    .map_or(true, |c| c.is_nullable)
+                    .is_none_or(|c| c.is_nullable)
             });
 
             let rel_name = fk.ref_table.clone();
@@ -246,7 +246,7 @@ pub fn generate_parent_relationships(
                 c.constraint_type == ConstraintType::ForeignKey
                     && c.foreign_key
                         .as_ref()
-                        .map_or(false, |fk| fk.ref_table == parent_table.name)
+                        .is_some_and(|fk| fk.ref_table == parent_table.name)
             })
             .collect();
 
@@ -257,8 +257,7 @@ pub fn generate_parent_relationships(
             if is_single_column_fk(constraint) {
                 let col_name = &constraint.columns[0];
                 let child_rel_name = fk_col_to_relationship_name(col_name, noidsuffix);
-                let is_onetoone =
-                    has_unique_constraint(col_name, &child_table.constraints);
+                let is_onetoone = has_unique_constraint(col_name, &child_table.constraints);
 
                 let attr_name = if multi_ref {
                     format!("{}_{}", child_table.name, child_rel_name)
@@ -343,7 +342,10 @@ pub fn is_association_table(table: &TableInfo) -> bool {
         .flat_map(|c| c.columns.iter().map(|s| s.as_str()))
         .collect();
 
-    table.columns.iter().all(|c| fk_cols.contains(c.name.as_str()))
+    table
+        .columns
+        .iter()
+        .all(|c| fk_cols.contains(c.name.as_str()))
 }
 
 /// For a many-to-many association table, get the two target table names and
@@ -478,9 +480,10 @@ pub fn find_inheritance_parent<'a>(
     }
 
     // Verify the target is a PK in the parent table
-    let parent = schema.tables.iter().find(|t| {
-        t.name == fk_info.ref_table && t.schema == fk_info.ref_schema
-    })?;
+    let parent = schema
+        .tables
+        .iter()
+        .find(|t| t.name == fk_info.ref_table && t.schema == fk_info.ref_schema)?;
 
     let parent_pk = parent
         .constraints

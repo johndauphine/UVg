@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # CRM 9-pair matrix runner — drives uvg through every (source, target)
 # permutation of {mssql, postgres, mysql} and reports table/FK/CHECK/index
-# counts plus apply success.
+# counts plus apply success. In strict mode, also verifies MSSQL→PostgreSQL
+# column metadata fidelity (length, precision/scale, nullability, identity,
+# temporal TZ class, and default presence).
 #
 # Run from the repo root or `testdata/crm/`. Expects:
 #   - Three Docker containers reachable from this host:
@@ -14,21 +16,28 @@
 #     relative to the script's repo root, falling back to `uvg` on PATH).
 #
 # Output: per-pair line + a final summary table written to
-# /tmp/uvg-matrix/results.tsv. Exit 0 if at least one pair succeeded,
-# non-zero only on infrastructure failures.
+# /tmp/uvg-matrix/results.tsv. Per-pair logs, generated DDL, and optional
+# column verification logs also land under /tmp/uvg-matrix/. Default exit
+# behavior stays permissive: exit 0 if at least one pair succeeded. Flags
+# below tighten that behavior.
 #
 # Flags:
-#   --strict   Exit non-zero if ANY pair status is not "OK". Used by CI
-#              to gate merges; local-dev default stays permissive so a
-#              one-off probe of a single failing pair doesn't abort the
-#              whole suite.
+#   --strict          Exit non-zero if ANY pair status is not "OK", and run
+#                     the MSSQL→PostgreSQL column verifier. Used by CI to
+#                     gate merges; local-dev default stays permissive so a
+#                     one-off probe of a single failing pair doesn't abort
+#                     the whole suite.
+#   --verify-columns  Run the same MSSQL→PostgreSQL column verifier without
+#                     enabling strict status handling for all 9 pairs.
 
 set -uo pipefail
 
 STRICT=0
+VERIFY_COLUMNS=0
 for arg in "$@"; do
   case "$arg" in
     --strict) STRICT=1 ;;
+    --verify-columns) VERIFY_COLUMNS=1 ;;
     -h|--help)
       # Print the leading header comment block (everything from line 2
       # up to the first non-`#` line). Avoids hard-coding line numbers
@@ -44,11 +53,15 @@ for arg in "$@"; do
   esac
 done
 
+[[ $STRICT -eq 1 ]] && VERIFY_COLUMNS=1
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 # Locate the uvg binary. Prefer an explicit override, then a release
 # build inside the repo, then $PATH.
 UVG="${UVG:-}"
 if [[ -z "$UVG" ]]; then
-  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   if [[ -x "$REPO_ROOT/target/release/uvg" ]]; then
     UVG="$REPO_ROOT/target/release/uvg"
   elif command -v uvg >/dev/null 2>&1; then
@@ -76,6 +89,10 @@ TARGETS=(mssql postgres mysql)
 
 mkdir -p /tmp/uvg-matrix
 echo -e "src\ttgt\twall\ttables\tFKs\tCHECKs\tindexes\tstatus" > /tmp/uvg-matrix/results.tsv
+VERIFY_COLUMNS_RESULTS=/tmp/uvg-matrix/verify_columns.tsv
+if [[ $VERIFY_COLUMNS -eq 1 ]]; then
+  echo -e "pair\tstatus\tlog" > "$VERIFY_COLUMNS_RESULTS"
+fi
 
 src_url() {
   case "$1" in
@@ -171,8 +188,40 @@ count_target() {
   esac
 }
 
+run_column_verifier() {
+  local pair=$1 tgt_db=$2 column_log=$3
+
+  echo "  verify_columns: checking MSSQL→PostgreSQL column metadata"
+  if MSSQL_CONTAINER="$MSSQL_CONTAINER" PG_CONTAINER="$PG_CONTAINER" \
+      "$SCRIPT_DIR/verify_columns.sh" CRM_MSSQL dbo "$tgt_db" public > "$column_log" 2>&1; then
+    echo -e "${pair}\tOK\t${column_log}" >> "$VERIFY_COLUMNS_RESULTS"
+    echo "  verify_columns: OK (log: $column_log)"
+    ((column_ok_count++))
+  else
+    echo -e "${pair}\tFAIL\t${column_log}" >> "$VERIFY_COLUMNS_RESULTS"
+    echo "  verify_columns: FAIL (log: $column_log)"
+    tail -20 "$column_log" | sed 's/^/    /'
+    ((column_fail_count++))
+  fi
+}
+
+skip_column_verifier() {
+  local pair=$1 status=$2 column_log=$3
+
+  {
+    echo "verify_columns: skipped"
+    echo "pair=${pair}"
+    echo "reason=matrix status ${status}"
+  } > "$column_log"
+  echo -e "${pair}\tSKIP_${status}\t${column_log}" >> "$VERIFY_COLUMNS_RESULTS"
+  echo "  verify_columns: SKIP (${status}; log: $column_log)"
+  ((column_fail_count++))
+}
+
 ok_count=0
 fail_count=0
+column_ok_count=0
+column_fail_count=0
 for src in "${SOURCES[@]}"; do
   for tgt in "${TARGETS[@]}"; do
     pair="${src}_to_${tgt}"
@@ -195,6 +244,9 @@ for src in "${SOURCES[@]}"; do
       wall=$(( $(date +%s) - start ))
       echo -e "${src}\t${tgt}\t${wall}s\t-\t-\t-\t-\tGEN_FAIL" >> /tmp/uvg-matrix/results.tsv
       echo "  GEN_FAIL ${wall}s"
+      if [[ $VERIFY_COLUMNS -eq 1 && "$pair" == "mssql_to_postgres" ]]; then
+        skip_column_verifier "$pair" "GEN_FAIL" "/tmp/uvg-matrix/${pair}.columns.log"
+      fi
       ((fail_count++))
       continue
     fi
@@ -213,6 +265,14 @@ for src in "${SOURCES[@]}"; do
     echo -e "${src}\t${tgt}\t${wall}s\t${counts}\t${status}" >> /tmp/uvg-matrix/results.tsv
     echo -e "  ${counts}\t${wall}s\t${status}"
     [[ -n "$apply_errors" ]] && echo "  errors: $apply_errors" | head -3
+    if [[ $VERIFY_COLUMNS -eq 1 && "$pair" == "mssql_to_postgres" ]]; then
+      column_log=/tmp/uvg-matrix/${pair}.columns.log
+      if [[ "$status" == "OK" ]]; then
+        run_column_verifier "$pair" "$tgt_db" "$column_log"
+      else
+        skip_column_verifier "$pair" "$status" "$column_log"
+      fi
+    fi
   done
 done
 
@@ -221,12 +281,18 @@ echo "=== RESULTS ==="
 column -t -s $'\t' /tmp/uvg-matrix/results.tsv
 echo ""
 echo "Summary: ${ok_count}/9 OK, ${fail_count}/9 failed"
+if [[ $VERIFY_COLUMNS -eq 1 ]]; then
+  echo "Column verification: ${column_ok_count}/1 OK, ${column_fail_count}/1 failed"
+  echo "Column verification results: $VERIFY_COLUMNS_RESULTS"
+fi
 
 # --strict (CI): fail if any pair didn't reach OK. Default (local dev):
 # fail only if nothing worked, so a single broken pair while you're
 # iterating doesn't kill the whole suite.
 if [[ $STRICT -eq 1 ]]; then
-  [[ $fail_count -gt 0 ]] && exit 1
+  [[ $fail_count -gt 0 || $column_fail_count -gt 0 ]] && exit 1
+elif [[ $VERIFY_COLUMNS -eq 1 ]]; then
+  [[ $ok_count -eq 0 || $column_fail_count -gt 0 ]] && exit 1
 else
   [[ $ok_count -eq 0 ]] && exit 1
 fi

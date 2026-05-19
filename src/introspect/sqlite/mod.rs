@@ -26,8 +26,7 @@ pub async fn introspect(
     for table in &mut all_tables {
         let create_sql = tables::query_create_sql(pool, &table.name).await?;
         table.columns = columns::query_columns(pool, &table.name, &create_sql).await?;
-        table.constraints =
-            constraints::query_constraints(pool, &table.name, &create_sql).await?;
+        table.constraints = constraints::query_constraints(pool, &table.name, &create_sql).await?;
         table.indexes = indexes::query_indexes(pool, &table.name).await?;
     }
 

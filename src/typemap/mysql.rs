@@ -209,15 +209,13 @@ pub fn map_column_type_dialect(col: &ColumnInfo) -> MappedType {
     let dt = col.udt_name.as_str();
 
     match dt {
-        "tinyint" if is_tinyint_bool(col) => {
-            MappedType {
-                sa_type: "TINYINT(display_width=1)".to_string(),
-                python_type: "int".to_string(),
-                import_module: MY.to_string(),
-                import_name: "TINYINT".to_string(),
-                element_import: None,
-            }
-        }
+        "tinyint" if is_tinyint_bool(col) => MappedType {
+            sa_type: "TINYINT(display_width=1)".to_string(),
+            python_type: "int".to_string(),
+            import_module: MY.to_string(),
+            import_name: "TINYINT".to_string(),
+            element_import: None,
+        },
         "tinyint" => {
             if is_unsigned(col) {
                 MappedType {
@@ -517,5 +515,4 @@ mod tests {
         let m = map_column_type(&c);
         assert_eq!(m.sa_type, "Enum('can't', 'won't', 'ok')");
     }
-
 }

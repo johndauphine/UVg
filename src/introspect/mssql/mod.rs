@@ -3,9 +3,9 @@ mod constraints;
 mod indexes;
 mod tables;
 
+use tiberius::{Client, Config, EncryptionLevel};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use tiberius::{Client, Config, EncryptionLevel};
 
 use crate::cli::GeneratorOptions;
 use crate::dialect::Dialect;
@@ -32,9 +32,9 @@ pub async fn connect(
         config.trust_cert();
     }
 
-    let tcp = TcpStream::connect(config.get_addr())
-        .await
-        .map_err(|e| UvgError::Connection(format!("TCP connection to {host}:{port} failed: {e}")))?;
+    let tcp = TcpStream::connect(config.get_addr()).await.map_err(|e| {
+        UvgError::Connection(format!("TCP connection to {host}:{port} failed: {e}"))
+    })?;
     tcp.set_nodelay(true)
         .map_err(|e| UvgError::Connection(format!("Failed to set TCP_NODELAY: {e}")))?;
 

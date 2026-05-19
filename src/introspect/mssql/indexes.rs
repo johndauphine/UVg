@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
+use tiberius::Client;
 use tokio::net::TcpStream;
 use tokio_util::compat::Compat;
-use tiberius::Client;
 
 use crate::error::UvgError;
 use crate::schema::IndexInfo;
@@ -34,15 +34,9 @@ pub async fn query_indexes(
     // Group rows by index name (MSSQL returns one row per column, unlike PG's array_agg)
     let mut index_map: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
     for row in rows {
-        let name: String = row
-            .get::<&str, _>("index_name")
-            .unwrap_or("")
-            .to_string();
+        let name: String = row.get::<&str, _>("index_name").unwrap_or("").to_string();
         let is_unique: bool = row.get::<bool, _>("is_unique").unwrap_or(false);
-        let col: String = row
-            .get::<&str, _>("column_name")
-            .unwrap_or("")
-            .to_string();
+        let col: String = row.get::<&str, _>("column_name").unwrap_or("").to_string();
 
         index_map
             .entry(name)

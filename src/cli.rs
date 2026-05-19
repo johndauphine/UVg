@@ -66,6 +66,7 @@ pub struct Cli {
     ///   - MSSQL: SET PARSEONLY ON. Catches syntax errors only;
     ///     name resolution is deferred to real execution.
     ///   - MySQL / SQLite: skipped (no parse-only mode).
+    ///
     /// Bad DDL surfaces before any real change is made.
     #[arg(long)]
     pub no_parse_check: bool,
@@ -448,7 +449,7 @@ impl Cli {
     ) -> Result<DdlOptions, crate::error::UvgError> {
         let target_dialect = if let Some(ref td) = self.target_dialect {
             td.parse::<Dialect>()
-                .map_err(|e| crate::error::UvgError::InvalidDialect(e))?
+                .map_err(crate::error::UvgError::InvalidDialect)?
         } else if let Some(dialect) = target_dialect_hint {
             dialect
         } else if let Some(ref target_url) = self.target_url {

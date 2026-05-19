@@ -107,8 +107,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let pid = std::process::id();
-        let dir =
-            std::env::temp_dir().join(format!("uvg-cli-test-{label}-{pid}-{nanos}"));
+        let dir = std::env::temp_dir().join(format!("uvg-cli-test-{label}-{pid}-{nanos}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -139,7 +138,11 @@ mod tests {
                 if path.is_dir() {
                     walk(root, &path, out);
                 } else {
-                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().to_string();
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string();
                     let bytes = std::fs::read(&path).unwrap();
                     out.push((rel, bytes));
                 }
@@ -185,7 +188,11 @@ mod tests {
     async fn test_profile_cli_fills_required_fields() {
         let dir = tmpdir("profile-cli");
         let source = dir.join("source.db");
-        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);").await;
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .await;
         let config_home = dir.join("config");
         let profile_dir = config_home.join("uvg");
         std::fs::create_dir_all(&profile_dir).unwrap();
@@ -205,7 +212,10 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("CREATE TABLE \"users\""), "missing users DDL: {stdout}");
+        assert!(
+            stdout.contains("CREATE TABLE \"users\""),
+            "missing users DDL: {stdout}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -239,19 +249,35 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         let raw = std::fs::read_to_string(&snapshot).unwrap();
-        assert!(raw.contains("format_version: 1"), "snapshot header missing: {raw}");
+        assert!(
+            raw.contains("format_version: 1"),
+            "snapshot header missing: {raw}"
+        );
         assert!(raw.contains("uvg_version:"), "uvg_version missing: {raw}");
         assert!(raw.contains("captured_at:"), "captured_at missing: {raw}");
         assert!(raw.contains("dialect: sqlite"), "dialect missing: {raw}");
 
-        let live = run_uvg(&["--generator", "ddl", "--target-dialect", "sqlite", &src_url, &tgt_url]);
+        let live = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            &src_url,
+            &tgt_url,
+        ]);
         assert!(
             live.status.success(),
             "live diff failed: {}",
             String::from_utf8_lossy(&live.stderr)
         );
-        let snap_source =
-            run_uvg(&["--generator", "ddl", "--target-dialect", "sqlite", &snapshot_ref, &tgt_url]);
+        let snap_source = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            &snapshot_ref,
+            &tgt_url,
+        ]);
         assert!(
             snap_source.status.success(),
             "snapshot source diff failed: {}",
@@ -259,15 +285,27 @@ mod tests {
         );
         assert_eq!(live.stdout, snap_source.stdout);
 
-        let live_target =
-            run_uvg(&["--generator", "ddl", "--target-dialect", "sqlite", &tgt_url, &src_url]);
+        let live_target = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            &tgt_url,
+            &src_url,
+        ]);
         assert!(
             live_target.status.success(),
             "live target diff failed: {}",
             String::from_utf8_lossy(&live_target.stderr)
         );
-        let snap_target =
-            run_uvg(&["--generator", "ddl", "--target-dialect", "sqlite", &tgt_url, &snapshot_ref]);
+        let snap_target = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            &tgt_url,
+            &snapshot_ref,
+        ]);
         assert!(
             snap_target.status.success(),
             "snapshot target diff failed: {}",
@@ -320,7 +358,11 @@ mod tests {
         let dir = tmpdir("risk-classify-missing-key");
         let source = dir.join("source.db");
         let target = dir.join("target.db");
-        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT);").await;
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT);",
+        )
+        .await;
         exec_sql(&target, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
@@ -488,7 +530,11 @@ mod tests {
         .await;
         // Touch the target so the file exists. uvg still sees an empty
         // schema and emits CREATE TABLEs for every source table.
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
 
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
@@ -496,12 +542,20 @@ mod tests {
 
         // First run — should produce per-table layout.
         let out = run_uvg(&[
-            "--generator", "ddl",
-            "--out-dir", &mig_str,
-            "--name", "initial",
-            &src_url, &tgt_url,
+            "--generator",
+            "ddl",
+            "--out-dir",
+            &mig_str,
+            "--name",
+            "initial",
+            &src_url,
+            &tgt_url,
         ]);
-        assert!(out.status.success(), "first run failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "first run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         assert!(migrations.join("users").is_dir(), "users/ subdir missing");
         assert!(migrations.join("posts").is_dir(), "posts/ subdir missing");
@@ -512,12 +566,22 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(users_sql.len(), 1, "expected one users sql, got {users_sql:?}");
+        assert_eq!(
+            users_sql.len(),
+            1,
+            "expected one users sql, got {users_sql:?}"
+        );
         assert!(users_sql[0].ends_with("__initial.sql"));
 
         let body = std::fs::read_to_string(migrations.join("users").join(&users_sql[0])).unwrap();
-        assert!(body.contains("-- Generated by uvg"), "missing provenance header: {body}");
-        assert!(body.contains("CREATE TABLE \"users\""), "missing CREATE: {body}");
+        assert!(
+            body.contains("-- Generated by uvg"),
+            "missing provenance header: {body}"
+        );
+        assert!(
+            body.contains("CREATE TABLE \"users\""),
+            "missing CREATE: {body}"
+        );
 
         // Snapshot the directory before the second (no-op) run.
         // To make the no-op meaningful, apply the migrations to the
@@ -546,14 +610,25 @@ mod tests {
 
         // Second run with identical source/target — must write nothing.
         let out2 = run_uvg(&[
-            "--generator", "ddl",
-            "--out-dir", &mig_str,
-            "--name", "should-not-appear",
-            &src_url, &tgt_url,
+            "--generator",
+            "ddl",
+            "--out-dir",
+            &mig_str,
+            "--name",
+            "should-not-appear",
+            &src_url,
+            &tgt_url,
         ]);
-        assert!(out2.status.success(), "noop run failed: {}", String::from_utf8_lossy(&out2.stderr));
+        assert!(
+            out2.status.success(),
+            "noop run failed: {}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
         let stderr = String::from_utf8_lossy(&out2.stderr);
-        assert!(stderr.contains("no schema changes"), "expected no-op message, got: {stderr}");
+        assert!(
+            stderr.contains("no schema changes"),
+            "expected no-op message, got: {stderr}"
+        );
 
         let after = snapshot_dir(&migrations);
         assert_eq!(
@@ -600,13 +675,20 @@ mod tests {
         )
         .await;
         // Bring the target file into existence with an empty schema.
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
 
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
 
         // Sanity: target starts empty.
-        assert!(list_tables(&target).await.is_empty(), "target should start empty");
+        assert!(
+            list_tables(&target).await.is_empty(),
+            "target should start empty"
+        );
 
         let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
         assert!(
@@ -659,18 +741,26 @@ mod tests {
                                 FOREIGN KEY(user_id) REFERENCES users(id));",
         )
         .await;
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
 
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
         let mig_str = migrations.display().to_string();
 
         let out = run_uvg(&[
-            "--generator", "ddl",
+            "--generator",
+            "ddl",
             "--apply",
-            "--out-dir", &mig_str,
-            "--name", "initial",
-            &src_url, &tgt_url,
+            "--out-dir",
+            &mig_str,
+            "--name",
+            "initial",
+            &src_url,
+            &tgt_url,
         ]);
         assert!(
             out.status.success(),
@@ -679,7 +769,10 @@ mod tests {
         );
 
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("wrote"), "expected write summary, got: {stderr}");
+        assert!(
+            stderr.contains("wrote"),
+            "expected write summary, got: {stderr}"
+        );
         assert!(
             stderr.contains("applied") && stderr.contains("file"),
             "expected apply summary, got: {stderr}"
@@ -698,11 +791,15 @@ mod tests {
         // Re-run is a no-op: nothing applied, nothing written.
         let before = snapshot_dir(&migrations);
         let out2 = run_uvg(&[
-            "--generator", "ddl",
+            "--generator",
+            "ddl",
             "--apply",
-            "--out-dir", &mig_str,
-            "--name", "should-not-appear",
-            &src_url, &tgt_url,
+            "--out-dir",
+            &mig_str,
+            "--name",
+            "should-not-appear",
+            &src_url,
+            &tgt_url,
         ]);
         assert!(
             out2.status.success(),
@@ -737,17 +834,37 @@ mod tests {
         let src_url = format!("sqlite:///{}", source.display());
 
         let out = run_uvg(&[
-            "--generator", "ddl", "--target-dialect", "sqlite",
-            "--tables", "users_*",
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            "--tables",
+            "users_*",
             &src_url,
         ]);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
 
-        assert!(stdout.contains("users_active"), "missing users_active: {stdout}");
-        assert!(stdout.contains("users_archive"), "missing users_archive: {stdout}");
-        assert!(!stdout.contains("orders"), "orders leaked through filter: {stdout}");
-        assert!(!stdout.contains("invoices"), "invoices leaked through filter: {stdout}");
+        assert!(
+            stdout.contains("users_active"),
+            "missing users_active: {stdout}"
+        );
+        assert!(
+            stdout.contains("users_archive"),
+            "missing users_archive: {stdout}"
+        );
+        assert!(
+            !stdout.contains("orders"),
+            "orders leaked through filter: {stdout}"
+        );
+        assert!(
+            !stdout.contains("invoices"),
+            "invoices leaked through filter: {stdout}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -768,16 +885,30 @@ mod tests {
         let src_url = format!("sqlite:///{}", source.display());
 
         let out = run_uvg(&[
-            "--generator", "ddl", "--target-dialect", "sqlite",
-            "--exclude-tables", "__*",
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            "--exclude-tables",
+            "__*",
             &src_url,
         ]);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
 
         assert!(stdout.contains("users"), "missing users: {stdout}");
-        assert!(!stdout.contains("__migrations"), "excluded table leaked: {stdout}");
-        assert!(!stdout.contains("__schema_log"), "excluded table leaked: {stdout}");
+        assert!(
+            !stdout.contains("__migrations"),
+            "excluded table leaked: {stdout}"
+        );
+        assert!(
+            !stdout.contains("__schema_log"),
+            "excluded table leaked: {stdout}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -788,8 +919,12 @@ mod tests {
         // attempt to connect to the (here, nonexistent) database.
         let bogus_url = "sqlite:///definitely/does/not/exist/db.db";
         let out = run_uvg(&[
-            "--generator", "ddl", "--target-dialect", "sqlite",
-            "--tables", "[unclosed",
+            "--generator",
+            "ddl",
+            "--target-dialect",
+            "sqlite",
+            "--tables",
+            "[unclosed",
             bogus_url,
         ]);
         assert!(!out.status.success(), "expected non-zero exit");
@@ -821,13 +956,22 @@ mod tests {
                                 FOREIGN KEY(user_id) REFERENCES users(id));",
         )
         .await;
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
 
         let out = run_uvg(&[
-            "--generator", "ddl", "--apply", "--progress", "on",
-            &src_url, &tgt_url,
+            "--generator",
+            "ddl",
+            "--apply",
+            "--progress",
+            "on",
+            &src_url,
+            &tgt_url,
         ]);
         assert!(
             out.status.success(),
@@ -872,15 +1016,28 @@ mod tests {
         let source = dir.join("source.db");
         let target = dir.join("target.db");
         exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
 
         let out = run_uvg(&[
-            "--generator", "ddl", "--apply", "--progress", "off",
-            &src_url, &tgt_url,
+            "--generator",
+            "ddl",
+            "--apply",
+            "--progress",
+            "off",
+            &src_url,
+            &tgt_url,
         ]);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
 
         assert!(
@@ -892,7 +1049,10 @@ mod tests {
             "class-breakdown summary leaked with --progress=off: {stderr}",
         );
         // Standard apply-summary still present.
-        assert!(stderr.contains("uvg: applied 1"), "missing apply summary: {stderr}");
+        assert!(
+            stderr.contains("uvg: applied 1"),
+            "missing apply summary: {stderr}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -907,12 +1067,20 @@ mod tests {
         let source = dir.join("source.db");
         let target = dir.join("target.db");
         exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
 
         let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             stderr.contains("parse-check skipped"),
@@ -931,22 +1099,37 @@ mod tests {
         let source = dir.join("source.db");
         let target = dir.join("target.db");
         exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
 
         let out = run_uvg(&[
-            "--generator", "ddl", "--apply", "--no-parse-check",
-            &src_url, &tgt_url,
+            "--generator",
+            "ddl",
+            "--apply",
+            "--no-parse-check",
+            &src_url,
+            &tgt_url,
         ]);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             !stderr.contains("parse-check skipped"),
             "skip note must not appear with --no-parse-check: {stderr}"
         );
         // Sanity: the apply itself still happened.
-        assert!(stderr.contains("uvg: applied"), "apply summary missing: {stderr}");
+        assert!(
+            stderr.contains("uvg: applied"),
+            "apply summary missing: {stderr}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -968,12 +1151,20 @@ mod tests {
         let source = dir.join("source.db");
         let target = dir.join("target.db");
         exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
-        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
         let src_url = format!("sqlite:///{}", source.display());
         let tgt_url = format!("sqlite:///{}", target.display());
 
         let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             !stderr.lines().any(|l| l.starts_with('[')),
@@ -1013,11 +1204,7 @@ mod tests {
         let mig_str = migrations.display().to_string();
 
         // No target URL — uvg should refuse and explain.
-        let out = run_uvg(&[
-            "--generator", "ddl",
-            "--out-dir", &mig_str,
-            &src_url,
-        ]);
+        let out = run_uvg(&["--generator", "ddl", "--out-dir", &mig_str, &src_url]);
         assert!(!out.status.success(), "expected non-zero exit");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(

@@ -35,28 +35,52 @@ pub fn map_column_type_dialect(col: &ColumnInfo) -> MappedType {
                 Some(n) => format!("VARCHAR({n})"),
                 None => "VARCHAR".to_string(),
             };
-            MappedType { sa_type, python_type: "str".to_string(), import_module: ms.to_string(), import_name: "VARCHAR".to_string(), element_import: None }
+            MappedType {
+                sa_type,
+                python_type: "str".to_string(),
+                import_module: ms.to_string(),
+                import_name: "VARCHAR".to_string(),
+                element_import: None,
+            }
         }
         "char" => {
             let sa_type = match col.character_maximum_length {
                 Some(n) => format!("CHAR({n})"),
                 None => "CHAR".to_string(),
             };
-            MappedType { sa_type, python_type: "str".to_string(), import_module: ms.to_string(), import_name: "CHAR".to_string(), element_import: None }
+            MappedType {
+                sa_type,
+                python_type: "str".to_string(),
+                import_module: ms.to_string(),
+                import_name: "CHAR".to_string(),
+                element_import: None,
+            }
         }
         "nvarchar" => {
             let sa_type = match col.character_maximum_length {
                 Some(n) => format!("NVARCHAR({n})"),
                 None => "NVARCHAR".to_string(),
             };
-            MappedType { sa_type, python_type: "str".to_string(), import_module: ms.to_string(), import_name: "NVARCHAR".to_string(), element_import: None }
+            MappedType {
+                sa_type,
+                python_type: "str".to_string(),
+                import_module: ms.to_string(),
+                import_name: "NVARCHAR".to_string(),
+                element_import: None,
+            }
         }
         "nchar" => {
             let sa_type = match col.character_maximum_length {
                 Some(n) => format!("NCHAR({n})"),
                 None => "NCHAR".to_string(),
             };
-            MappedType { sa_type, python_type: "str".to_string(), import_module: ms.to_string(), import_name: "NCHAR".to_string(), element_import: None }
+            MappedType {
+                sa_type,
+                python_type: "str".to_string(),
+                import_module: ms.to_string(),
+                import_name: "NCHAR".to_string(),
+                element_import: None,
+            }
         }
         "text" => simple("TEXT", "str", ms),
         "ntext" => simple("NTEXT", "str", ms),
@@ -121,7 +145,11 @@ pub fn map_column_type(col: &ColumnInfo) -> MappedType {
             element_import: None,
         },
         "varchar" | "char" => {
-            let sa_type = format_string_type("String", col.character_maximum_length, col.collation.as_deref());
+            let sa_type = format_string_type(
+                "String",
+                col.character_maximum_length,
+                col.collation.as_deref(),
+            );
             MappedType {
                 sa_type,
                 python_type: "str".to_string(),
@@ -131,7 +159,11 @@ pub fn map_column_type(col: &ColumnInfo) -> MappedType {
             }
         }
         "nvarchar" | "nchar" => {
-            let sa_type = format_string_type("Unicode", col.character_maximum_length, col.collation.as_deref());
+            let sa_type = format_string_type(
+                "Unicode",
+                col.character_maximum_length,
+                col.collation.as_deref(),
+            );
             MappedType {
                 sa_type,
                 python_type: "str".to_string(),
@@ -155,9 +187,7 @@ pub fn map_column_type(col: &ColumnInfo) -> MappedType {
         },
         "date" => simple("Date", "datetime.date", "sqlalchemy"),
         "time" => simple("Time", "datetime.time", "sqlalchemy"),
-        "uniqueidentifier" => {
-            simple("UNIQUEIDENTIFIER", "str", "sqlalchemy.dialects.mssql")
-        }
+        "uniqueidentifier" => simple("UNIQUEIDENTIFIER", "str", "sqlalchemy.dialects.mssql"),
         // Fallback: use the data_type as-is, uppercased
         other => MappedType {
             sa_type: other.to_uppercase(),

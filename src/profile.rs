@@ -159,25 +159,25 @@ fn apply_requested_profile_from_path(
     );
     fill_option(
         &mut cli.tables,
-        profile.tables.as_ref().map(csv),
+        profile.tables.as_deref().map(csv),
         sources,
         "tables",
     );
     fill_option(
         &mut cli.exclude_tables,
-        profile.exclude_tables.as_ref().map(csv),
+        profile.exclude_tables.as_deref().map(csv),
         sources,
         "exclude_tables",
     );
     fill_option(
         &mut cli.schemas,
-        profile.schemas.as_ref().map(csv),
+        profile.schemas.as_deref().map(csv),
         sources,
         "schemas",
     );
     fill_option(
         &mut cli.options,
-        profile.options.as_ref().map(csv),
+        profile.options.as_deref().map(csv),
         sources,
         "options",
     );
@@ -255,7 +255,7 @@ fn fill_bool(
     }
 }
 
-fn csv(values: &Vec<String>) -> String {
+fn csv(values: &[String]) -> String {
     values.join(",")
 }
 

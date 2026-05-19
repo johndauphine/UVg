@@ -60,11 +60,7 @@ pub async fn query_columns(
                 identity: None,
                 comment,
                 collation: row.collation_name,
-                autoincrement: if is_auto_increment {
-                    Some(true)
-                } else {
-                    None
-                },
+                autoincrement: if is_auto_increment { Some(true) } else { None },
             }
         })
         .collect();

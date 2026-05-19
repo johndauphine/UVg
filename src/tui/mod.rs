@@ -175,10 +175,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     result
 }
 
-async fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut App,
-) -> Result<()> {
+async fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| render(f, app))?;
 
@@ -239,8 +236,7 @@ async fn event_loop(
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 // Global quit: Ctrl-C
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
-                {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     return Ok(());
                 }
 
@@ -424,9 +420,7 @@ fn handle_view_keys(app: &mut App, key: KeyCode) {
             // at least one executable statement, otherwise the user
             // sees "successfully applied 0 statement(s)" with no
             // actual change to the target.
-            if !app.empty_diff
-                && count_statements(&collect_apply_sql(&app.nodes)) > 0
-            {
+            if !app.empty_diff && count_statements(&collect_apply_sql(&app.nodes)) > 0 {
                 app.state = AppState::Confirming;
             }
         }
@@ -492,14 +486,19 @@ fn render_input(f: &mut Frame, app: &App) {
         Constraint::Length(3), // source URL
         Constraint::Length(3), // target URL
         Constraint::Length(2), // help
-        Constraint::Min(0),   // spacer
+        Constraint::Min(0),    // spacer
         Constraint::Length(2), // error
     ])
     .split(area);
 
     // Title
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("uvg", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "uvg",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" -- DDL Diff & Apply"),
     ]))
     .block(Block::default().borders(Borders::BOTTOM));
@@ -511,13 +510,12 @@ fn render_input(f: &mut Frame, app: &App) {
     } else {
         Style::default()
     };
-    let source = Paragraph::new(app.source_url.as_str())
-        .block(
-            Block::default()
-                .title(" Source URL ")
-                .borders(Borders::ALL)
-                .border_style(source_style),
-        );
+    let source = Paragraph::new(app.source_url.as_str()).block(
+        Block::default()
+            .title(" Source URL ")
+            .borders(Borders::ALL)
+            .border_style(source_style),
+    );
     f.render_widget(source, chunks[1]);
 
     // Target URL
@@ -526,13 +524,12 @@ fn render_input(f: &mut Frame, app: &App) {
     } else {
         Style::default()
     };
-    let target = Paragraph::new(app.target_url.as_str())
-        .block(
-            Block::default()
-                .title(" Target URL ")
-                .borders(Borders::ALL)
-                .border_style(target_style),
-        );
+    let target = Paragraph::new(app.target_url.as_str()).block(
+        Block::default()
+            .title(" Target URL ")
+            .borders(Borders::ALL)
+            .border_style(target_style),
+    );
     f.render_widget(target, chunks[2]);
 
     // Place cursor
@@ -559,8 +556,7 @@ fn render_input(f: &mut Frame, app: &App) {
 
     // Error message
     if let Some(ref err) = app.error_msg {
-        let error = Paragraph::new(err.as_str())
-            .style(Style::default().fg(Color::Red));
+        let error = Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red));
         f.render_widget(error, chunks[5]);
     }
 }
@@ -568,7 +564,11 @@ fn render_input(f: &mut Frame, app: &App) {
 fn render_status(f: &mut Frame, app: &App) {
     let area = f.area();
     let msg = Paragraph::new(app.status_msg.as_str())
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL).title(" Working "));
     let centered = centered_rect(50, 5, area);
     f.render_widget(Clear, centered);
@@ -605,11 +605,8 @@ fn render_ddl_view(f: &mut Frame, app: &App) {
         f.render_widget(body, chunks[0]);
     } else {
         // Two-pane: tree on the left, SQL detail on the right.
-        let panes = Layout::horizontal([
-            Constraint::Percentage(30),
-            Constraint::Percentage(70),
-        ])
-        .split(chunks[0]);
+        let panes = Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(chunks[0]);
 
         let items: Vec<ListItem> = app
             .nodes
@@ -622,11 +619,7 @@ fn render_ddl_view(f: &mut Frame, app: &App) {
             })
             .collect();
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(" Tables ")
-                    .borders(Borders::ALL),
-            )
+            .block(Block::default().title(" Tables ").borders(Borders::ALL))
             .highlight_style(
                 Style::default()
                     .bg(Color::DarkGray)
@@ -662,7 +655,10 @@ fn render_view_footer(app: &App) -> Paragraph<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
     if app.empty_diff || app.nodes.is_empty() {
-        spans.push(Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "q/Esc",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" back"));
         return Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray));
     }
@@ -677,30 +673,53 @@ fn render_view_footer(app: &App) -> Paragraph<'static> {
     );
     spans.push(Span::styled(
         summary,
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ));
 
     if multi {
-        spans.push(Span::styled("Up/Dn", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "Up/Dn",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" nav  "));
-        spans.push(Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "j/k",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" scroll  "));
-        spans.push(Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "Space",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" toggle  "));
-        spans.push(Span::styled("A", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "A",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" all  "));
     } else {
-        spans.push(Span::styled("Up/Dn", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "Up/Dn",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" scroll  "));
     }
 
     // Same guard the 'a' key handler uses: don't suggest apply if the
     // checked SQL is only comments (e.g. SQLite ALTER warnings).
     if stmt_count > 0 {
-        spans.push(Span::styled("a", Style::default().add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "a",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::raw(" apply  "));
     }
-    spans.push(Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(
+        "q/Esc",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
     spans.push(Span::raw(" back"));
 
     Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray))
@@ -719,9 +738,17 @@ fn render_confirm_popup(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" yes  "),
-            Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "n",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" no"),
         ]),
     ])
@@ -736,11 +763,7 @@ fn render_confirm_popup(f: &mut Frame, app: &App) {
 
 fn render_done(f: &mut Frame, app: &App) {
     let area = f.area();
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(2),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(area);
 
     let (text, style) = if let Some(ref err) = app.error_msg {
         (err.as_str(), Style::default().fg(Color::Red))
@@ -805,16 +828,15 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
         vec![source_dialect.default_schema().to_string()]
     };
     let options = crate::cli::GeneratorOptions::default();
-    let source_schema =
-        db::introspect_with_config(
-            source_config,
-            &source_schemas,
-            &crate::table_filter::TableFilter::allow_all(),
-            false,
-            &options,
-            crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
-        )
-        .await?;
+    let source_schema = db::introspect_with_config(
+        source_config,
+        &source_schemas,
+        &crate::table_filter::TableFilter::allow_all(),
+        false,
+        &options,
+        crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
+    )
+    .await?;
 
     // Introspect target
     let target_schemas = if let Some(db) = target_config.database_name() {
@@ -823,16 +845,15 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
         vec![target_dialect.default_schema().to_string()]
     };
 
-    let target_schema_data =
-        db::introspect_with_config(
-            make_cli(&target_url, app.trust_cert).parse_connection()?,
-            &target_schemas,
-            &crate::table_filter::TableFilter::allow_all(),
-            false,
-            &options,
-            crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
-        )
-        .await?;
+    let target_schema_data = db::introspect_with_config(
+        make_cli(&target_url, app.trust_cert).parse_connection()?,
+        &target_schemas,
+        &crate::table_filter::TableFilter::allow_all(),
+        false,
+        &options,
+        crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
+    )
+    .await?;
 
     let ddl_opts = DdlOptions {
         target_dialect,
@@ -843,7 +864,11 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
         nocomments: false,
     };
 
-    Ok(compute_changes(&source_schema, &target_schema_data, &ddl_opts))
+    Ok(compute_changes(
+        &source_schema,
+        &target_schema_data,
+        &ddl_opts,
+    ))
 }
 
 async fn apply_ddl(app: &mut App) -> Result<Vec<db::StmtResult>> {
@@ -941,7 +966,11 @@ mod tests {
 
     #[test]
     fn test_group_changes_non_default_schema_uses_double_underscore() {
-        let changes = vec![ch("billing", Some("orders"), "CREATE TABLE \"billing\".\"orders\"();")];
+        let changes = vec![ch(
+            "billing",
+            Some("orders"),
+            "CREATE TABLE \"billing\".\"orders\"();",
+        )];
         let nodes = group_changes(changes);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, "billing__orders");

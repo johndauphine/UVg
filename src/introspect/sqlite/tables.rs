@@ -3,10 +3,7 @@ use sqlx::SqlitePool;
 use crate::error::UvgError;
 use crate::schema::{TableInfo, TableType};
 
-pub async fn query_tables(
-    pool: &SqlitePool,
-    noviews: bool,
-) -> Result<Vec<TableInfo>, UvgError> {
+pub async fn query_tables(pool: &SqlitePool, noviews: bool) -> Result<Vec<TableInfo>, UvgError> {
     let rows = sqlx::query_as::<_, TableRow>(
         r#"
         SELECT name, type
@@ -49,16 +46,12 @@ pub async fn query_tables(
 
 /// Get the CREATE TABLE SQL for a table from sqlite_master.
 /// Used for AUTOINCREMENT detection and CHECK constraint parsing.
-pub async fn query_create_sql(
-    pool: &SqlitePool,
-    table_name: &str,
-) -> Result<String, UvgError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-    )
-    .bind(table_name)
-    .fetch_optional(pool)
-    .await?;
+pub async fn query_create_sql(pool: &SqlitePool, table_name: &str) -> Result<String, UvgError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table_name)
+            .fetch_optional(pool)
+            .await?;
 
     Ok(row.map(|r| r.0).unwrap_or_default())
 }

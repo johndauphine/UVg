@@ -1,6 +1,6 @@
+use tiberius::Client;
 use tokio::net::TcpStream;
 use tokio_util::compat::Compat;
-use tiberius::Client;
 
 use crate::error::UvgError;
 use crate::schema::{TableInfo, TableType};

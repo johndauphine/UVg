@@ -1,16 +1,15 @@
 use crate::cli::GeneratorOptions;
 use crate::codegen::imports::ImportCollector;
 use crate::codegen::{
-    enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
-    format_index_kwargs, format_python_string_literal, format_server_default,
-    generate_enum_class, is_primary_key_column, is_serial_default,
-    is_standard_sequence_name, is_unique_constraint_index, parse_check_boolean,
-    parse_check_enum, parse_sequence_name, quote_constraint_columns, topo_sort_tables,
-    Generator,
+    enum_class_name, find_enum_for_column, format_fk_options, format_index_kwargs,
+    format_python_string_literal, format_server_default, generate_enum_class,
+    is_primary_key_column, is_serial_default, is_standard_sequence_name,
+    is_unique_constraint_index, parse_check_boolean, parse_check_enum, parse_sequence_name,
+    quote_constraint_columns, topo_sort_tables, Generator,
 };
-use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
 use crate::naming::table_to_variable_name;
+use crate::schema::EnumInfo;
 use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
 use crate::typemap::{map_column_type, map_column_type_dialect};
 
@@ -51,29 +50,31 @@ impl Generator for TablesGenerator {
 
         // Extract synthetic enums from check constraints (unless nosyntheticenums)
         if !options.nosyntheticenums {
-        for table in &sorted_tables {
-            for constraint in &table.constraints {
-                if constraint.constraint_type == ConstraintType::Check {
-                    if let Some(ref expr) = constraint.check_expression {
-                        if let Some((col_name, values)) = parse_check_enum(expr) {
-                            let key = (table.name.clone(), col_name.clone());
-                            if !synthetic_enum_cols.contains_key(&key) {
-                                use heck::ToUpperCamelCase;
-                                let enum_name =
-                                    format!("{}_{}", table.name, col_name).to_upper_camel_case();
-                                let ei = EnumInfo {
-                                    name: enum_name.clone(),
-                                    schema: None,
-                                    values,
-                                };
-                                all_enums.push(ei);
-                                synthetic_enum_cols.insert(key, enum_name);
+            for table in &sorted_tables {
+                for constraint in &table.constraints {
+                    if constraint.constraint_type == ConstraintType::Check {
+                        if let Some(ref expr) = constraint.check_expression {
+                            if let Some((col_name, values)) = parse_check_enum(expr) {
+                                let key = (table.name.clone(), col_name.clone());
+                                if let std::collections::hash_map::Entry::Vacant(entry) =
+                                    synthetic_enum_cols.entry(key)
+                                {
+                                    use heck::ToUpperCamelCase;
+                                    let enum_name = format!("{}_{}", table.name, col_name)
+                                        .to_upper_camel_case();
+                                    let ei = EnumInfo {
+                                        name: enum_name.clone(),
+                                        schema: None,
+                                        values,
+                                    };
+                                    all_enums.push(ei);
+                                    entry.insert(enum_name);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
         } // end nosyntheticenums guard
 
         // Track which enums are actually used
@@ -139,6 +140,7 @@ impl Generator for TablesGenerator {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_table(
     table: &TableInfo,
     imports: &mut ImportCollector,
@@ -165,7 +167,10 @@ fn generate_table(
 
         // Check if column is a boolean (detected from IN (0, 1) check on integer types)
         let bool_key = (table.name.clone(), col.name.clone());
-        let is_integer_type = matches!(col.udt_name.as_str(), "int2" | "int4" | "int8" | "integer" | "smallint" | "bigint" | "tinyint" | "int");
+        let is_integer_type = matches!(
+            col.udt_name.as_str(),
+            "int2" | "int4" | "int8" | "integer" | "smallint" | "bigint" | "tinyint" | "int"
+        );
         if boolean_cols.contains(&bool_key) && is_integer_type {
             imports.add("sqlalchemy", "Boolean");
             col_args.push("Boolean".to_string());
@@ -220,9 +225,15 @@ fn generate_table(
                     format!("{}()", base_mapped.sa_type),
                 ];
                 if let Some(ref cn) = di.constraint_name {
-                    domain_args.push(format!("constraint_name={}", format_python_string_literal(cn)));
+                    domain_args.push(format!(
+                        "constraint_name={}",
+                        format_python_string_literal(cn)
+                    ));
                 }
-                domain_args.push(format!("not_null={}", if di.not_null { "True" } else { "False" }));
+                domain_args.push(format!(
+                    "not_null={}",
+                    if di.not_null { "True" } else { "False" }
+                ));
                 if let Some(ref check) = di.check_expression {
                     imports.add("sqlalchemy", "text");
                     domain_args.push(format!("check={}", format_server_default(check, dialect)));
@@ -288,7 +299,10 @@ fn generate_table(
                                 format_python_string_literal(seq_schema)
                             ));
                         } else {
-                            col_args.push(format!("Sequence({})", format_python_string_literal(&full_seq_name)));
+                            col_args.push(format!(
+                                "Sequence({})",
+                                format_python_string_literal(&full_seq_name)
+                            ));
                         }
                     }
                 }
@@ -315,8 +329,11 @@ fn generate_table(
             if constraint.constraint_type == ConstraintType::ForeignKey {
                 if let Some(ref fk) = constraint.foreign_key {
                     imports.add("sqlalchemy", "ForeignKeyConstraint");
-                    let local_cols: Vec<String> =
-                        constraint.columns.iter().map(|c| format!("'{c}'")).collect();
+                    let local_cols: Vec<String> = constraint
+                        .columns
+                        .iter()
+                        .map(|c| format!("'{c}'"))
+                        .collect();
                     let ref_cols: Vec<String> = fk
                         .ref_columns
                         .iter()

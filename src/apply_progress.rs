@@ -12,20 +12,15 @@ use std::time::Duration;
 use crate::db::StmtResult;
 
 /// User-facing setting for progress emission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProgressMode {
     /// Emit when stderr is a TTY; silent otherwise. Default.
+    #[default]
     Auto,
     /// Always emit progress.
     On,
     /// Never emit progress.
     Off,
-}
-
-impl Default for ProgressMode {
-    fn default() -> Self {
-        ProgressMode::Auto
-    }
 }
 
 impl ProgressMode {
@@ -311,7 +306,10 @@ mod tests {
         stats.record(&r("CREATE TABLE users (id int)", 10));
         stats.record(&r("CREATE INDEX ix_users_id ON users(id)", 20));
         stats.record(&r("CREATE INDEX ix_users_name ON users(name)", 50));
-        stats.record(&r("ALTER TABLE users ADD CONSTRAINT fk FOREIGN KEY (org_id) REFERENCES orgs(id)", 5));
+        stats.record(&r(
+            "ALTER TABLE users ADD CONSTRAINT fk FOREIGN KEY (org_id) REFERENCES orgs(id)",
+            5,
+        ));
         let s = stats.render_summary();
         assert!(s.starts_with("Applied 4 statement(s)"), "got: {s}");
         assert!(s.contains("1 tables"), "got: {s}");

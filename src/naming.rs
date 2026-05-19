@@ -10,7 +10,13 @@ pub fn table_to_class_name(table_name: &str) -> String {
 pub fn table_to_variable_name(table_name: &str) -> String {
     let sanitized: String = table_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("t_{sanitized}")
 }
@@ -18,11 +24,10 @@ pub fn table_to_variable_name(table_name: &str) -> String {
 /// Python keywords and builtins that conflict with SQLAlchemy attribute names.
 const PYTHON_RESERVED: &[&str] = &[
     // Python keywords
-    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
-    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
-    "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return",
-    "try", "while", "with", "yield",
-    // SQLAlchemy reserved attribute names
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield", // SQLAlchemy reserved attribute names
     "metadata", "registry",
 ];
 
@@ -35,7 +40,13 @@ pub fn column_to_attr_name(col_name: &str) -> String {
     // Replace non-identifier chars with underscores
     let mut sanitized: String = trimmed
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     // Fallback for empty/whitespace-only names
@@ -56,12 +67,6 @@ pub fn column_to_attr_name(col_name: &str) -> String {
     sanitized
 }
 
-/// Check if an attribute name conflicts with a set of imported names.
-/// Used at generation time when we know what names are actually imported.
-pub fn has_import_conflict(attr_name: &str, imported_names: &[&str]) -> bool {
-    imported_names.contains(&attr_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +84,4 @@ mod tests {
         assert_eq!(table_to_variable_name("users"), "t_users");
         assert_eq!(table_to_variable_name("order_items"), "t_order_items");
     }
-
 }

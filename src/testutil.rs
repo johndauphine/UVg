@@ -45,6 +45,7 @@ impl ColumnInfoBuilder {
         self
     }
 
+    #[allow(dead_code)]
     pub fn not_null(mut self) -> Self {
         self.inner.is_nullable = false;
         self
@@ -84,6 +85,7 @@ impl ColumnInfoBuilder {
         self
     }
 
+    #[allow(dead_code)]
     pub fn collation(mut self, c: &str) -> Self {
         self.inner.collation = Some(c.to_string());
         self
@@ -178,6 +180,7 @@ impl TableInfoBuilder {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn fk_full(
         mut self,
         name: &str,
@@ -236,7 +239,10 @@ impl TableInfoBuilder {
             name: name.to_string(),
             is_unique: unique,
             columns: cols.iter().map(|s| s.to_string()).collect(),
-            kwargs: kwargs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            kwargs: kwargs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         });
         self
     }
@@ -246,6 +252,7 @@ impl TableInfoBuilder {
         self
     }
 
+    #[allow(dead_code)]
     pub fn table_type(mut self, tt: TableType) -> Self {
         self.inner.table_type = tt;
         self
@@ -277,10 +284,7 @@ pub fn schema_mssql(tables: Vec<TableInfo>) -> IntrospectedSchema {
 }
 
 /// Create an IntrospectedSchema with Postgres dialect and enum definitions.
-pub fn schema_pg_with_enums(
-    tables: Vec<TableInfo>,
-    enums: Vec<EnumInfo>,
-) -> IntrospectedSchema {
+pub fn schema_pg_with_enums(tables: Vec<TableInfo>, enums: Vec<EnumInfo>) -> IntrospectedSchema {
     IntrospectedSchema {
         dialect: Dialect::Postgres,
         tables,
@@ -290,6 +294,7 @@ pub fn schema_pg_with_enums(
 }
 
 /// Shorthand for creating an IntrospectedSchema with MySQL dialect.
+#[allow(dead_code)]
 pub fn schema_mysql(tables: Vec<TableInfo>) -> IntrospectedSchema {
     IntrospectedSchema {
         dialect: Dialect::Mysql,

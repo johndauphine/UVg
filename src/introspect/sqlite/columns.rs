@@ -36,11 +36,7 @@ pub async fn query_columns(
                 identity: None,
                 comment: None, // SQLite has no column comments
                 collation: None,
-                autoincrement: if has_autoincrement {
-                    Some(true)
-                } else {
-                    None
-                },
+                autoincrement: if has_autoincrement { Some(true) } else { None },
             }
         })
         .collect();
@@ -163,9 +159,9 @@ fn split_respecting_parens(s: &str) -> Vec<&str> {
 /// Extract the first token from a column definition, handling quoted identifiers.
 fn extract_first_token(s: &str) -> &str {
     let s = s.trim();
-    if s.starts_with('"') {
+    if let Some(stripped) = s.strip_prefix('"') {
         // Quoted identifier
-        if let Some(end) = s[1..].find('"') {
+        if let Some(end) = stripped.find('"') {
             return &s[..end + 2];
         }
     }

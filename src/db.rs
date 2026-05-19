@@ -22,7 +22,15 @@ pub(crate) async fn introspect_with_config(
                 .max_connections(pool_size(concurrency))
                 .connect(&url)
                 .await?;
-            let s = introspect::pg::introspect(&pool, schemas, table_filter, noviews, options, concurrency).await;
+            let s = introspect::pg::introspect(
+                &pool,
+                schemas,
+                table_filter,
+                noviews,
+                options,
+                concurrency,
+            )
+            .await;
             pool.close().await;
             Ok(s?)
         }
@@ -38,14 +46,8 @@ pub(crate) async fn introspect_with_config(
                 introspect::mssql::connect(&host, port, &database, &user, &password, trust_cert)
                     .await?;
             Ok(
-                introspect::mssql::introspect(
-                    &mut client,
-                    schemas,
-                    table_filter,
-                    noviews,
-                    options,
-                )
-                .await?,
+                introspect::mssql::introspect(&mut client, schemas, table_filter, noviews, options)
+                    .await?,
             )
         }
         ConnectionConfig::Mysql(url) => {
@@ -53,8 +55,15 @@ pub(crate) async fn introspect_with_config(
                 .max_connections(pool_size(concurrency))
                 .connect(&url)
                 .await?;
-            let s =
-                introspect::mysql::introspect(&pool, schemas, table_filter, noviews, options, concurrency).await;
+            let s = introspect::mysql::introspect(
+                &pool,
+                schemas,
+                table_filter,
+                noviews,
+                options,
+                concurrency,
+            )
+            .await;
             pool.close().await;
             Ok(s?)
         }
@@ -344,9 +353,7 @@ pub(crate) async fn parse_check_ddl(
             // Always reset; if PARSEONLY OFF itself fails the
             // connection is closing anyway and that's the caller's
             // problem to surface.
-            let _ = client
-                .execute("SET PARSEONLY OFF".to_string(), &[])
-                .await;
+            let _ = client.execute("SET PARSEONLY OFF".to_string(), &[]).await;
         }
         ConnectionConfig::Mysql(_) | ConnectionConfig::Sqlite(_) => {
             // No parse-only mode. Caller is expected to gate this
@@ -545,11 +552,17 @@ where
     loop {
         match action(attempt).await {
             Ok(_) => {
-                return RetryOutcome { error: None, duration: start.elapsed() };
+                return RetryOutcome {
+                    error: None,
+                    duration: start.elapsed(),
+                };
             }
             Err((msg, retryable)) => {
                 if !retryable || attempt >= max_retries {
-                    return RetryOutcome { error: Some(msg), duration: start.elapsed() };
+                    return RetryOutcome {
+                        error: Some(msg),
+                        duration: start.elapsed(),
+                    };
                 }
                 let delay = retry_delay_ms(attempt + 1);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -595,7 +608,10 @@ pub(crate) fn retry_delay_ms(attempt: u8) -> u64 {
 
 fn is_retryable_sqlx_pg_error(err: &sqlx::Error) -> bool {
     // Network-layer disruption: always retry.
-    if matches!(err, sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut) {
+    if matches!(
+        err,
+        sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut
+    ) {
         return true;
     }
     err.as_database_error()
@@ -605,7 +621,10 @@ fn is_retryable_sqlx_pg_error(err: &sqlx::Error) -> bool {
 }
 
 fn is_retryable_sqlx_mysql_error(err: &sqlx::Error) -> bool {
-    if matches!(err, sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut) {
+    if matches!(
+        err,
+        sqlx::Error::Io(_) | sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut
+    ) {
         return true;
     }
     err.as_database_error()
@@ -665,7 +684,10 @@ mod tests {
         let ddl = "COMMENT ON TABLE foo IS 'has; semicolons; inside';\nCREATE TABLE bar (id INT);";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 2);
-        assert_eq!(stmts[0], "COMMENT ON TABLE foo IS 'has; semicolons; inside'");
+        assert_eq!(
+            stmts[0],
+            "COMMENT ON TABLE foo IS 'has; semicolons; inside'"
+        );
         assert_eq!(stmts[1], "CREATE TABLE bar (id INT)");
     }
 
@@ -674,13 +696,17 @@ mod tests {
         let ddl = "COMMENT ON TABLE foo IS 'it''s a test; with quotes';\nSELECT 1;";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 2);
-        assert_eq!(stmts[0], "COMMENT ON TABLE foo IS 'it''s a test; with quotes'");
+        assert_eq!(
+            stmts[0],
+            "COMMENT ON TABLE foo IS 'it''s a test; with quotes'"
+        );
         assert_eq!(stmts[1], "SELECT 1");
     }
 
     #[test]
     fn test_dollar_quoting() {
-        let ddl = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN; END; $$ LANGUAGE plpgsql;\nSELECT 1;";
+        let ddl =
+            "CREATE FUNCTION f() RETURNS void AS $$ BEGIN; END; $$ LANGUAGE plpgsql;\nSELECT 1;";
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("BEGIN; END;"));
@@ -766,11 +792,11 @@ mod tests {
         assert!(classify_mysql_code_retryable("1205")); // lock wait timeout
         assert!(classify_mysql_code_retryable("2006")); // server gone
         assert!(classify_mysql_code_retryable("2013")); // connection lost
-        // Logical errors: not retryable.
+                                                        // Logical errors: not retryable.
         assert!(!classify_mysql_code_retryable("1062")); // dup entry
         assert!(!classify_mysql_code_retryable("1146")); // table doesn't exist
         assert!(!classify_mysql_code_retryable("1064")); // syntax error
-        // Don't substring-match — 12130 must NOT be confused with 1213.
+                                                         // Don't substring-match — 12130 must NOT be confused with 1213.
         assert!(!classify_mysql_code_retryable("12130"));
         assert!(!classify_mysql_code_retryable(""));
     }
@@ -780,7 +806,7 @@ mod tests {
         assert!(classify_mssql_code_retryable(1205)); // deadlock victim
         assert!(classify_mssql_code_retryable(4060)); // cannot open db (transient)
         assert!(classify_mssql_code_retryable(11001)); // host unreachable
-        // Logical errors.
+                                                       // Logical errors.
         assert!(!classify_mssql_code_retryable(2627)); // PK violation
         assert!(!classify_mssql_code_retryable(208)); // invalid object name
         assert!(!classify_mssql_code_retryable(0));
@@ -811,7 +837,10 @@ mod tests {
         // Defensive: passing 0 must not panic or wrap. Treat as
         // first attempt (100ms tier).
         let d = retry_delay_ms(0);
-        assert!((90..=110).contains(&d), "attempt 0 should hit the 100ms tier, got {d}");
+        assert!(
+            (90..=110).contains(&d),
+            "attempt 0 should hit the 100ms tier, got {d}"
+        );
     }
 
     // ---- run_with_retry behavior (#43) ----
@@ -878,7 +907,11 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retries on non-retryable");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no retries on non-retryable"
+        );
         let err = outcome.error.expect("should surface immediately");
         assert!(err.contains("logical bug"), "got: {err}");
     }
@@ -923,7 +956,11 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "max_retries=0 means single attempt");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "max_retries=0 means single attempt"
+        );
         assert!(outcome.error.is_some());
     }
 }

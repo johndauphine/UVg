@@ -357,7 +357,7 @@ pub(super) fn generate_column_def(
     let mut parts = vec![format!("    {qname} {type_str}")];
 
     // NOT NULL (skip for auto-increment PKs where NOT NULL is implied)
-    if !col.is_nullable && !(is_auto && is_pk) {
+    if !(col.is_nullable || is_auto && is_pk) {
         parts.push("NOT NULL".to_string());
     }
 
@@ -704,7 +704,7 @@ fn translate_check_predicate(expr: &str, source: Dialect, target: Dialect) -> St
 /// brackets inside a string literal would be miscounted, but real CHECK
 /// predicates don't typically embed `[` in strings.
 fn translate_mssql_check_predicate(expr: &str) -> String {
-    expr.replace('[', "\"").replace(']', "\"")
+    expr.replace(['[', ']'], "\"")
 }
 
 /// Strip PG `::type` and `::type(N)` cast suffixes from a predicate. PG's
@@ -1020,10 +1020,8 @@ fn detect_fk_cycles(tables: &[TableInfo]) -> bool {
 
     for table in tables {
         let key = (table.schema.as_str(), table.name.as_str());
-        if !visited.contains(&key) {
-            if dfs(key, &adj, &mut visited, &mut in_stack) {
-                return true;
-            }
+        if !visited.contains(&key) && dfs(key, &adj, &mut visited, &mut in_stack) {
+            return true;
         }
     }
     false

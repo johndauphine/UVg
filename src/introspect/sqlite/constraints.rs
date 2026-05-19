@@ -39,10 +39,7 @@ pub async fn query_constraints(
     Ok(constraints)
 }
 
-async fn query_primary_key(
-    pool: &SqlitePool,
-    table_name: &str,
-) -> Result<Vec<String>, UvgError> {
+async fn query_primary_key(pool: &SqlitePool, table_name: &str) -> Result<Vec<String>, UvgError> {
     let rows = sqlx::query_as::<_, PkRow>(
         "SELECT name, pk FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk",
     )
@@ -204,7 +201,7 @@ fn find_keyword_ascii(haystack: &str, needle: &str) -> Option<usize> {
             window
                 .iter()
                 .zip(needle_bytes.iter())
-                .all(|(h, n)| h.to_ascii_uppercase() == n.to_ascii_uppercase())
+                .all(|(h, n)| h.eq_ignore_ascii_case(n))
         })
 }
 
@@ -359,8 +356,7 @@ mod tests {
 
     #[test]
     fn test_parse_check_with_default_containing_comma() {
-        let sql =
-            "CREATE TABLE t (id INTEGER, label TEXT DEFAULT 'a,b', CHECK(id > 0))";
+        let sql = "CREATE TABLE t (id INTEGER, label TEXT DEFAULT 'a,b', CHECK(id > 0))";
         let checks = parse_check_constraints(sql);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].check_expression.as_deref(), Some("id > 0"));

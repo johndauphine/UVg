@@ -310,10 +310,7 @@ mod tests {
         );
         assert_eq!(map_column_type(&col("date")).sa_type, "Date");
         assert_eq!(map_column_type(&col("time")).sa_type, "Time");
-        assert_eq!(
-            map_column_type(&col("timetz")).sa_type,
-            "Time(True)"
-        );
+        assert_eq!(map_column_type(&col("timetz")).sa_type, "Time(True)");
     }
 
     #[test]

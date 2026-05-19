@@ -109,11 +109,7 @@ fn extract_model_name(block: &str) -> Option<String> {
 
     // "class Users(Base):" → "users" (only if block contains __tablename__)
     if first_line.starts_with("class ") && first_line.contains('(') {
-        let class_name = first_line
-            .strip_prefix("class ")?
-            .split('(')
-            .next()?
-            .trim();
+        let class_name = first_line.strip_prefix("class ")?.split('(').next()?.trim();
         // Must have __tablename__ to be a model (not an enum class or Base)
         let has_tablename = block.lines().skip(1).any(|line| {
             let trimmed = line.trim_start();
@@ -226,9 +222,9 @@ pub fn is_unique_constraint_index(
     if !index.is_unique {
         return false;
     }
-    constraints
-        .iter()
-        .any(|c| c.constraint_type == crate::schema::ConstraintType::Unique && c.columns == index.columns)
+    constraints.iter().any(|c| {
+        c.constraint_type == crate::schema::ConstraintType::Unique && c.columns == index.columns
+    })
 }
 
 /// Quote a list of column names for use in constraint arguments.
@@ -289,15 +285,12 @@ pub fn parse_check_enum(expression: &str) -> Option<(String, Vec<String>)> {
     // Find " IN (" (case-insensitive) using byte-level search to avoid
     // index mismatch from to_uppercase() on non-ASCII input.
     let needle = b" IN (";
-    let in_pos = expr
-        .as_bytes()
-        .windows(needle.len())
-        .position(|window| {
-            window
-                .iter()
-                .zip(needle.iter())
-                .all(|(b, n)| b.to_ascii_uppercase() == *n)
-        })?;
+    let in_pos = expr.as_bytes().windows(needle.len()).position(|window| {
+        window
+            .iter()
+            .zip(needle.iter())
+            .all(|(b, n)| b.to_ascii_uppercase() == *n)
+    })?;
     let col_part = expr[..in_pos].trim();
 
     // Extract column name (strip optional table prefix)
@@ -343,15 +336,12 @@ pub fn parse_check_boolean(expression: &str) -> Option<String> {
     let expr = expression.trim();
 
     let needle = b" IN (";
-    let in_pos = expr
-        .as_bytes()
-        .windows(needle.len())
-        .position(|window| {
-            window
-                .iter()
-                .zip(needle.iter())
-                .all(|(b, n)| b.to_ascii_uppercase() == *n)
-        })?;
+    let in_pos = expr.as_bytes().windows(needle.len()).position(|window| {
+        window
+            .iter()
+            .zip(needle.iter())
+            .all(|(b, n)| b.to_ascii_uppercase() == *n)
+    })?;
     let col_part = expr[..in_pos].trim();
 
     // Extract column name (strip optional schema.table prefix)
@@ -393,7 +383,13 @@ pub fn generate_enum_class(enum_info: &crate::schema::EnumInfo) -> String {
         let mut member_name: String = value
             .to_uppercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         if member_name.starts_with(|c: char| c.is_ascii_digit()) {
             member_name = format!("_{member_name}");
@@ -401,7 +397,10 @@ pub fn generate_enum_class(enum_info: &crate::schema::EnumInfo) -> String {
         if member_name.is_empty() {
             member_name = "_".to_string();
         }
-        lines.push(format!("    {member_name} = {}", format_python_string_literal(value)));
+        lines.push(format!(
+            "    {member_name} = {}",
+            format_python_string_literal(value)
+        ));
     }
     lines.join("\n")
 }
@@ -474,8 +473,10 @@ pub fn topo_sort_tables(tables: &[crate::schema::TableInfo]) -> Vec<&crate::sche
 
     // If there's a cycle, append remaining tables alphabetically
     if result.len() < n {
-        let in_result: std::collections::HashSet<usize> =
-            result.iter().map(|t| name_to_idx[t.name.as_str()]).collect();
+        let in_result: std::collections::HashSet<usize> = result
+            .iter()
+            .map(|t| name_to_idx[t.name.as_str()])
+            .collect();
         let mut remaining: Vec<(usize, &str)> = (0..n)
             .filter(|i| !in_result.contains(i))
             .map(|i| (i, tables[i].name.as_str()))
@@ -535,10 +536,7 @@ mod tests {
             format_server_default("now()", Dialect::Postgres),
             "text('now()')"
         );
-        assert_eq!(
-            format_server_default("0", Dialect::Postgres),
-            "text('0')"
-        );
+        assert_eq!(format_server_default("0", Dialect::Postgres), "text('0')");
     }
 
     #[test]
@@ -554,10 +552,7 @@ mod tests {
 
     #[test]
     fn test_format_server_default_mssql() {
-        assert_eq!(
-            format_server_default("((0))", Dialect::Mssql),
-            "text('0')"
-        );
+        assert_eq!(format_server_default("((0))", Dialect::Mssql), "text('0')");
         assert_eq!(
             format_server_default("(N'hello')", Dialect::Mssql),
             "text(\"'hello'\")"
@@ -578,7 +573,10 @@ mod tests {
 
     #[test]
     fn test_is_serial_default() {
-        assert!(is_serial_default("nextval('seq'::regclass)", Dialect::Postgres));
+        assert!(is_serial_default(
+            "nextval('seq'::regclass)",
+            Dialect::Postgres
+        ));
         assert!(!is_serial_default("nextval('seq')", Dialect::Mssql));
         assert!(!is_serial_default("((1))", Dialect::Mssql));
     }
@@ -613,7 +611,10 @@ class Posts(Base):
         assert!(names.contains(&"base.py"), "missing base.py: {names:?}");
         assert!(names.contains(&"users.py"), "missing users.py: {names:?}");
         assert!(names.contains(&"posts.py"), "missing posts.py: {names:?}");
-        assert!(names.contains(&"__init__.py"), "missing __init__.py: {names:?}");
+        assert!(
+            names.contains(&"__init__.py"),
+            "missing __init__.py: {names:?}"
+        );
 
         // base.py should have imports and Base class
         let base = &files.iter().find(|(n, _)| n == "base.py").unwrap().1;
@@ -622,8 +623,14 @@ class Posts(Base):
 
         // model files should have from .base import
         let users = &files.iter().find(|(n, _)| n == "users.py").unwrap().1;
-        assert!(users.contains("from .base import"), "users.py missing base import");
-        assert!(users.contains("__tablename__"), "users.py missing tablename");
+        assert!(
+            users.contains("from .base import"),
+            "users.py missing base import"
+        );
+        assert!(
+            users.contains("__tablename__"),
+            "users.py missing tablename"
+        );
     }
 
     #[test]
@@ -655,7 +662,10 @@ class Users(Base):
 
         // Enum should NOT be split into its own file
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(!names.contains(&"status_enum.py"), "enum should not be a separate file");
+        assert!(
+            !names.contains(&"status_enum.py"),
+            "enum should not be a separate file"
+        );
     }
 
     #[test]
@@ -678,7 +688,13 @@ t_posts = Table(
 ";
         let files = split_python_output(full);
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"t_users.py"), "missing t_users.py: {names:?}");
-        assert!(names.contains(&"t_posts.py"), "missing t_posts.py: {names:?}");
+        assert!(
+            names.contains(&"t_users.py"),
+            "missing t_users.py: {names:?}"
+        );
+        assert!(
+            names.contains(&"t_posts.py"),
+            "missing t_posts.py: {names:?}"
+        );
     }
 }

@@ -327,6 +327,22 @@ Benchmarked against sqlacodegen 3.2.0 on the StackOverflow 2010 database (9 tabl
 cargo test
 ```
 
+Before opening a PR, run the same quality gates CI enforces:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+CI also runs dependency, advisory, license, and source checks with
+`cargo-deny`. To run the same gate locally:
+
+```bash
+cargo install --locked cargo-deny
+cargo deny --all-features --locked check advisories licenses bans sources
+```
+
 Integration tests require a live database (except SQLite which runs in-memory):
 
 ```bash

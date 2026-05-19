@@ -7,14 +7,13 @@ use crate::codegen::relationships::{
 };
 use crate::codegen::{
     enum_class_name, escape_python_string, find_enum_for_column, format_fk_options,
-    format_index_kwargs, format_python_string_literal, format_server_default,
-    generate_enum_class, has_primary_key, is_primary_key_column, is_serial_default,
-    is_unique_constraint_index, parse_check_enum, quote_constraint_columns, topo_sort_tables,
-    Generator,
+    format_index_kwargs, format_python_string_literal, format_server_default, generate_enum_class,
+    has_primary_key, is_primary_key_column, is_serial_default, is_unique_constraint_index,
+    parse_check_enum, quote_constraint_columns, topo_sort_tables, Generator,
 };
-use crate::schema::EnumInfo;
 use crate::dialect::Dialect;
 use crate::naming::{column_to_attr_name, table_to_class_name, table_to_variable_name};
+use crate::schema::EnumInfo;
 use crate::schema::{ConstraintType, IntrospectedSchema, TableInfo};
 use crate::typemap::{map_column_type, map_column_type_dialect};
 
@@ -29,8 +28,14 @@ impl Generator for DeclarativeGenerator {
         let mut needs_decimal = false;
         let mut needs_uuid = false;
 
-        let has_any_pk = schema.tables.iter().any(|t| has_primary_key(&t.constraints));
-        let has_any_no_pk = schema.tables.iter().any(|t| !has_primary_key(&t.constraints));
+        let has_any_pk = schema
+            .tables
+            .iter()
+            .any(|t| has_primary_key(&t.constraints));
+        let has_any_no_pk = schema
+            .tables
+            .iter()
+            .any(|t| !has_primary_key(&t.constraints));
 
         if has_any_pk {
             imports.add("sqlalchemy.orm", "DeclarativeBase");
@@ -45,7 +50,11 @@ impl Generator for DeclarativeGenerator {
             imports.add("sqlalchemy", "Column");
         }
 
-        let metadata_ref = if has_any_pk { "Base.metadata" } else { "metadata" };
+        let metadata_ref = if has_any_pk {
+            "Base.metadata"
+        } else {
+            "metadata"
+        };
 
         // Collect named enums and synthetic enums from check constraints
         let mut all_enums: Vec<EnumInfo> = schema.enums.clone();
@@ -56,29 +65,31 @@ impl Generator for DeclarativeGenerator {
 
         // Extract synthetic enums from check constraints (unless nosyntheticenums)
         if !options.nosyntheticenums {
-        for table_ref in &sorted_tables {
-            for constraint in &table_ref.constraints {
-                if constraint.constraint_type == ConstraintType::Check {
-                    if let Some(ref expr) = constraint.check_expression {
-                        if let Some((col_name, values)) = parse_check_enum(expr) {
-                            let key = (table_ref.name.clone(), col_name.clone());
-                            if !synthetic_enum_cols.contains_key(&key) {
-                                use heck::ToUpperCamelCase;
-                                let enum_name =
-                                    format!("{}_{}", table_ref.name, col_name).to_upper_camel_case();
-                                let ei = EnumInfo {
-                                    name: enum_name.clone(),
-                                    schema: None,
-                                    values,
-                                };
-                                all_enums.push(ei);
-                                synthetic_enum_cols.insert(key, enum_name);
+            for table_ref in &sorted_tables {
+                for constraint in &table_ref.constraints {
+                    if constraint.constraint_type == ConstraintType::Check {
+                        if let Some(ref expr) = constraint.check_expression {
+                            if let Some((col_name, values)) = parse_check_enum(expr) {
+                                let key = (table_ref.name.clone(), col_name.clone());
+                                if let std::collections::hash_map::Entry::Vacant(entry) =
+                                    synthetic_enum_cols.entry(key)
+                                {
+                                    use heck::ToUpperCamelCase;
+                                    let enum_name = format!("{}_{}", table_ref.name, col_name)
+                                        .to_upper_camel_case();
+                                    let ei = EnumInfo {
+                                        name: enum_name.clone(),
+                                        schema: None,
+                                        values,
+                                    };
+                                    all_enums.push(ei);
+                                    entry.insert(enum_name);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
         } // end nosyntheticenums guard
 
         // Track which enums are used
@@ -103,10 +114,24 @@ impl Generator for DeclarativeGenerator {
 
             if is_association_table(table) {
                 // M2M association table: render as Table() with ForeignKey on columns
-                let block = generate_association_table(table, &mut imports, options, schema.dialect, metadata_ref);
+                let block = generate_association_table(
+                    table,
+                    &mut imports,
+                    options,
+                    schema.dialect,
+                    metadata_ref,
+                );
                 blocks.push(block);
             } else if has_primary_key(&table.constraints) {
-                let (block, meta) = generate_class(table, &mut imports, options, schema.dialect, schema, &all_enums, &synthetic_enum_cols);
+                let (block, meta) = generate_class(
+                    table,
+                    &mut imports,
+                    options,
+                    schema.dialect,
+                    schema,
+                    &all_enums,
+                    &synthetic_enum_cols,
+                );
                 if meta.needs_optional {
                     needs_optional = true;
                 }
@@ -121,8 +146,13 @@ impl Generator for DeclarativeGenerator {
                 }
                 blocks.push(block);
             } else {
-                let block =
-                    generate_table_fallback(table, &mut imports, options, schema.dialect, metadata_ref);
+                let block = generate_table_fallback(
+                    table,
+                    &mut imports,
+                    options,
+                    schema.dialect,
+                    metadata_ref,
+                );
                 blocks.push(block);
             }
         }
@@ -238,7 +268,9 @@ fn generate_class(
 
     // Pre-scan: check if any column has a server_default (which imports `text`)
     let will_import_text = table.columns.iter().any(|c| {
-        c.column_default.as_ref().map_or(false, |d| !is_serial_default(d, dialect))
+        c.column_default
+            .as_ref()
+            .is_some_and(|d| !is_serial_default(d, dialect))
     });
 
     // Pre-compute attribute names and resolve collisions
@@ -401,9 +433,7 @@ fn generate_class(
         }
 
         let mc_str = mc_args.join(", ");
-        let line = format!(
-            "    {attr_name}: Mapped[{type_annotation}] = mapped_column({mc_str})"
-        );
+        let line = format!("    {attr_name}: Mapped[{type_annotation}] = mapped_column({mc_str})");
         col_lines.push(ColLine {
             is_pk,
             is_nullable: col.is_nullable,
@@ -422,7 +452,11 @@ fn generate_class(
         .filter(|c| !c.is_pk && c.is_nullable)
         .collect();
 
-    for col_line in pk_cols.iter().chain(non_nullable.iter()).chain(nullable.iter()) {
+    for col_line in pk_cols
+        .iter()
+        .chain(non_nullable.iter())
+        .chain(nullable.iter())
+    {
         lines.push(col_line.line.clone());
     }
 
@@ -434,7 +468,8 @@ fn generate_class(
             vec![]
         };
         let child = generate_child_relationships(table, schema, options.noidsuffix);
-        let m2m = generate_m2m_relationships(table, schema, dialect.default_schema(), options.noidsuffix);
+        let m2m =
+            generate_m2m_relationships(table, schema, dialect.default_schema(), options.noidsuffix);
         (parent, child, m2m)
     } else {
         (vec![], vec![], vec![])
@@ -451,7 +486,8 @@ fn generate_class(
     }
 
     // Resolve relationship name conflicts with column attribute names
-    let col_attr_names: std::collections::HashSet<&str> = attr_names.iter().map(|s| s.as_str()).collect();
+    let col_attr_names: std::collections::HashSet<&str> =
+        attr_names.iter().map(|s| s.as_str()).collect();
     let mut rel_attr_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut renames: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
@@ -490,7 +526,11 @@ fn generate_class(
         imports.add("sqlalchemy.orm", "relationship");
         lines.push(String::new()); // blank line before relationships
 
-        for rel in parent_rels.iter().chain(m2m_rels.iter()).chain(child_rels.iter()) {
+        for rel in parent_rels
+            .iter()
+            .chain(m2m_rels.iter())
+            .chain(child_rels.iter())
+        {
             if rel.is_nullable && !rel.is_collection {
                 meta.needs_optional = true;
             }
@@ -504,7 +544,10 @@ fn generate_class(
 /// Pre-compute sanitized attribute names for all columns, resolving collisions.
 /// When two columns sanitize to the same name, the later one gets a trailing `_`.
 fn resolve_attr_names(columns: &[crate::schema::ColumnInfo]) -> Vec<String> {
-    let mut names: Vec<String> = columns.iter().map(|c| column_to_attr_name(&c.name)).collect();
+    let mut names: Vec<String> = columns
+        .iter()
+        .map(|c| column_to_attr_name(&c.name))
+        .collect();
 
     // Resolve collisions: if name[i] == name[j] where j > i, append _ to name[j]
     for i in 0..names.len() {
@@ -535,8 +578,11 @@ fn build_table_args(
             {
                 if let Some(ref fk) = constraint.foreign_key {
                     imports.add("sqlalchemy", "ForeignKeyConstraint");
-                    let local_cols: Vec<String> =
-                        constraint.columns.iter().map(|c| format!("'{c}'")).collect();
+                    let local_cols: Vec<String> = constraint
+                        .columns
+                        .iter()
+                        .map(|c| format!("'{c}'"))
+                        .collect();
                     let ref_cols: Vec<String> = fk
                         .ref_columns
                         .iter()
@@ -568,9 +614,7 @@ fn build_table_args(
                     imports.add("sqlalchemy", "CheckConstraint");
                     let expr_literal = format_python_string_literal(expr);
                     if constraint.name.is_empty() {
-                        positional_args.push(format!(
-                            "CheckConstraint({expr_literal})"
-                        ));
+                        positional_args.push(format!("CheckConstraint({expr_literal})"));
                     } else {
                         positional_args.push(format!(
                             "CheckConstraint({expr_literal}, name='{}')",
@@ -689,11 +733,17 @@ fn generate_association_table(
             if let Some(ref fk_info) = fk_constraint.foreign_key {
                 imports.add("sqlalchemy", "ForeignKey");
                 let target = if fk_info.ref_schema != dialect.default_schema() {
-                    format!("{}.{}.{}", fk_info.ref_schema, fk_info.ref_table, fk_info.ref_columns[0])
+                    format!(
+                        "{}.{}.{}",
+                        fk_info.ref_schema, fk_info.ref_table, fk_info.ref_columns[0]
+                    )
                 } else {
                     format!("{}.{}", fk_info.ref_table, fk_info.ref_columns[0])
                 };
-                body_items.push(format!("Column('{}', ForeignKey('{}'))", col_info.name, target));
+                body_items.push(format!(
+                    "Column('{}', ForeignKey('{}'))",
+                    col_info.name, target
+                ));
             }
         } else {
             let mapped = if options.keep_dialect_types {
@@ -804,8 +854,11 @@ fn generate_table_fallback(
             if constraint.constraint_type == ConstraintType::ForeignKey {
                 if let Some(ref fk) = constraint.foreign_key {
                     imports.add("sqlalchemy", "ForeignKeyConstraint");
-                    let local_cols: Vec<String> =
-                        constraint.columns.iter().map(|c| format!("'{c}'")).collect();
+                    let local_cols: Vec<String> = constraint
+                        .columns
+                        .iter()
+                        .map(|c| format!("'{c}'"))
+                        .collect();
                     let ref_cols: Vec<String> = fk
                         .ref_columns
                         .iter()
