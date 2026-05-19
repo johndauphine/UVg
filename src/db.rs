@@ -14,14 +14,15 @@ pub(crate) async fn introspect_with_config(
     table_filter: &TableFilter,
     noviews: bool,
     options: &GeneratorOptions,
+    concurrency: usize,
 ) -> Result<IntrospectedSchema> {
     match config {
         ConnectionConfig::Postgres(url) => {
             let pool = sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
+                .max_connections(pool_size(concurrency))
                 .connect(&url)
                 .await?;
-            let s = introspect::pg::introspect(&pool, schemas, table_filter, noviews, options).await;
+            let s = introspect::pg::introspect(&pool, schemas, table_filter, noviews, options, concurrency).await;
             pool.close().await;
             Ok(s?)
         }
@@ -49,11 +50,11 @@ pub(crate) async fn introspect_with_config(
         }
         ConnectionConfig::Mysql(url) => {
             let pool = sqlx::mysql::MySqlPoolOptions::new()
-                .max_connections(1)
+                .max_connections(pool_size(concurrency))
                 .connect(&url)
                 .await?;
             let s =
-                introspect::mysql::introspect(&pool, schemas, table_filter, noviews, options).await;
+                introspect::mysql::introspect(&pool, schemas, table_filter, noviews, options, concurrency).await;
             pool.close().await;
             Ok(s?)
         }
@@ -67,6 +68,10 @@ pub(crate) async fn introspect_with_config(
             Ok(s?)
         }
     }
+}
+
+fn pool_size(concurrency: usize) -> u32 {
+    concurrency.max(1).min(u32::MAX as usize) as u32
 }
 
 /// Result of executing a single DDL statement.
@@ -696,6 +701,14 @@ mod tests {
         let stmts = split_statements(ddl);
         assert_eq!(stmts.len(), 1);
         assert_eq!(stmts[0], "CREATE TABLE a (id INT)");
+    }
+
+    #[test]
+    fn test_risk_comments_skipped() {
+        let ddl = "-- RISK: blocking\nALTER TABLE users ADD COLUMN email TEXT;";
+        let stmts = split_statements(ddl);
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0], "ALTER TABLE users ADD COLUMN email TEXT");
     }
 
     #[test]

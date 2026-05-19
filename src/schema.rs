@@ -1,7 +1,8 @@
 use crate::dialect::Dialect;
+use serde::{Deserialize, Serialize};
 
 /// Represents an introspected database schema containing all tables and their metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntrospectedSchema {
     pub dialect: Dialect,
     pub tables: Vec<TableInfo>,
@@ -12,7 +13,7 @@ pub struct IntrospectedSchema {
 }
 
 /// A PostgreSQL domain type wrapping a base type with constraints.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainInfo {
     pub name: String,
     pub schema: Option<String>,
@@ -23,7 +24,7 @@ pub struct DomainInfo {
 }
 
 /// A named enum type in the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumInfo {
     pub name: String,
     pub schema: Option<String>,
@@ -31,7 +32,7 @@ pub struct EnumInfo {
 }
 
 /// Metadata for a single table or view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct TableInfo {
     pub schema: String,
@@ -43,14 +44,15 @@ pub struct TableInfo {
     pub indexes: Vec<IndexInfo>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TableType {
     Table,
     View,
 }
 
 /// Metadata for a single column.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct ColumnInfo {
     pub name: String,
@@ -71,7 +73,7 @@ pub struct ColumnInfo {
 }
 
 /// Parameters for an identity column's underlying sequence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct IdentityInfo {
     pub start: i64,
@@ -83,7 +85,7 @@ pub struct IdentityInfo {
 }
 
 /// Metadata for a constraint (PK, FK, Unique, Check).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct ConstraintInfo {
     pub name: String,
@@ -95,7 +97,8 @@ pub struct ConstraintInfo {
     pub check_expression: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConstraintType {
     PrimaryKey,
     ForeignKey,
@@ -103,7 +106,7 @@ pub enum ConstraintType {
     Check,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct ForeignKeyInfo {
     pub ref_schema: String,
@@ -114,7 +117,7 @@ pub struct ForeignKeyInfo {
 }
 
 /// Metadata for a database index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexInfo {
     pub name: String,
     pub is_unique: bool,

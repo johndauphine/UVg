@@ -33,7 +33,10 @@ ratatui = "0.29"
 crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 glob = "0.3"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

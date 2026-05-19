@@ -812,6 +812,7 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
             &crate::table_filter::TableFilter::allow_all(),
             false,
             &options,
+            crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
         )
         .await?;
 
@@ -829,6 +830,7 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
             &crate::table_filter::TableFilter::allow_all(),
             false,
             &options,
+            crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
         )
         .await?;
 
@@ -859,6 +861,7 @@ async fn apply_ddl(app: &mut App) -> Result<Vec<db::StmtResult>> {
 fn make_cli(url: &str, trust_cert: bool) -> Cli {
     Cli {
         command: None,
+        profile: None,
         url: Some(url.to_string()),
         target_url: None,
         generator: "ddl".to_string(),
@@ -868,6 +871,8 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
         progress: crate::apply_progress::ProgressMode::Auto,
         apply_retries: 3,
         no_parse_check: false,
+        risk_classify: false,
+        introspect_concurrency: crate::cli::DEFAULT_INTROSPECT_CONCURRENCY,
         tables: None,
         exclude_tables: None,
         schemas: None,

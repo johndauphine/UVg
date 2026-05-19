@@ -10,7 +10,10 @@ mod introspect;
 mod migrations;
 mod naming;
 mod output;
+mod profile;
+mod risk_classify;
 mod schema;
+mod snapshot;
 mod table_filter;
 #[cfg(test)]
 mod testutil;
@@ -18,18 +21,19 @@ mod tui;
 mod typemap;
 
 use std::fs;
+use std::path::Path;
 
 use anyhow::Result;
-use clap::Parser;
-use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, ConnectionConfig};
+use crate::cli::{Cli, Command, ConnectionConfig, GeneratorOptions, SnapshotCommand};
+use crate::codegen::ddl_diff::{compute_changes, render_changes};
 use crate::codegen::declarative::DeclarativeGenerator;
-use crate::codegen::ddl_diff::compute_changes;
 use crate::codegen::tables::TablesGenerator;
 use crate::codegen::Generator;
 use crate::output::{apply_order, write_split_changes, Manifest, OutputContext};
+use crate::schema::{IntrospectedSchema, TableType};
+use crate::table_filter::TableFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,102 +41,31 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_with_profile()?;
 
     if let Some(command) = cli.command.as_ref() {
-        return migrations::run(&cli, command).await;
+        return match command {
+            Command::Snapshot(args) => run_snapshot(&cli, args).await,
+            _ => migrations::run(&cli, command).await,
+        };
     }
 
     if cli.interactive {
         return tui::run(cli).await;
     }
 
-    let config = cli.parse_connection()?;
-    let dialect = config.dialect();
-    // MySQL default schema = database name from URL; others use static defaults.
-    let schemas = if let Some(db) = config.database_name() {
-        cli.schema_list_or(&db)
-    } else {
-        cli.schema_list_or(dialect.default_schema())
-    };
     let table_filter = cli.table_filter()?;
     let options = cli.generator_options();
+    let source_input = cli
+        .url
+        .as_deref()
+        .ok_or_else(|| error::UvgError::Connection("database URL is required".to_string()))?;
 
     tracing::debug!("Connecting to database...");
 
-    let schema = match config {
-        ConnectionConfig::Postgres(url) => {
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&url)
-                .await?;
-            tracing::debug!("Introspecting schema...");
-            let s = introspect::pg::introspect(
-                &pool,
-                &schemas,
-                &table_filter,
-                cli.noviews,
-                &options,
-            )
-            .await;
-            pool.close().await;
-            s?
-        }
-        ConnectionConfig::Mssql {
-            host,
-            port,
-            database,
-            user,
-            password,
-            trust_cert,
-        } => {
-            let mut client =
-                introspect::mssql::connect(&host, port, &database, &user, &password, trust_cert)
-                    .await?;
-            tracing::debug!("Introspecting schema...");
-            introspect::mssql::introspect(
-                &mut client,
-                &schemas,
-                &table_filter,
-                cli.noviews,
-                &options,
-            )
-            .await?
-        }
-        ConnectionConfig::Mysql(url) => {
-            let pool = sqlx::mysql::MySqlPoolOptions::new()
-                .max_connections(1)
-                .connect(&url)
-                .await?;
-            tracing::debug!("Introspecting schema...");
-            let s = introspect::mysql::introspect(
-                &pool,
-                &schemas,
-                &table_filter,
-                cli.noviews,
-                &options,
-            )
-            .await;
-            pool.close().await;
-            s?
-        }
-        ConnectionConfig::Sqlite(url) => {
-            let pool = sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect(&url)
-                .await?;
-            tracing::debug!("Introspecting schema...");
-            let s = introspect::sqlite::introspect(
-                &pool,
-                &table_filter,
-                cli.noviews,
-                &options,
-            )
-            .await;
-            pool.close().await;
-            s?
-        }
-    };
+    let schema =
+        load_schema_input(&cli, source_input, &table_filter, cli.noviews, &options).await?;
+    let dialect = schema.dialect;
 
     tracing::debug!("Found {} tables/views", schema.tables.len());
 
@@ -150,43 +83,39 @@ async fn main() -> Result<()> {
                 let files = DeclarativeGenerator.generate_split(&schema, &options);
                 write_split_output(&files, &cli.outfile)?;
             } else {
-                write_output(&DeclarativeGenerator.generate(&schema, &options), &cli.outfile)?;
+                write_output(
+                    &DeclarativeGenerator.generate(&schema, &options),
+                    &cli.outfile,
+                )?;
             }
         }
         "ddl" => {
             use crate::codegen::ddl::{DdlGenerator, DdlOutput};
 
-            let ddl_opts = cli.ddl_options(dialect)?;
-
             // --apply needs a target to execute against. Fail fast before we
             // do any work the user would have to throw away.
-            if ddl_opts.apply && cli.target_url.is_none() {
+            if cli.apply && cli.target_url.is_none() {
+                return Err(anyhow::anyhow!("--apply requires a target database URL"));
+            }
+            if cli.apply && cli.target_url.as_deref().is_some_and(is_snapshot_input) {
                 return Err(anyhow::anyhow!(
-                    "--apply requires a target database URL"
+                    "--apply requires a live target database URL, not a snapshot"
                 ));
             }
 
-            // If a target URL is provided, introspect it for diff
+            // If a target URL or snapshot is provided, load it for diff.
             let target_schema = if let Some(ref target_url) = cli.target_url {
-                let target_config = cli.parse_target_connection(target_url)?;
-                let target_dialect = target_config.dialect();
-                let target_schemas = if let Some(db) = target_config.database_name() {
-                    cli.schema_list_or(&db)
-                } else {
-                    cli.schema_list_or(target_dialect.default_schema())
-                };
                 Some(
-                    db::introspect_with_config(
-                        target_config,
-                        &target_schemas,
-                        &table_filter,
-                        cli.noviews,
-                        &options,
-                    )
-                    .await?,
+                    load_schema_input(&cli, target_url, &table_filter, cli.noviews, &options)
+                        .await?,
                 )
             } else {
                 None
+            };
+            let ddl_opts = if let Some(target) = target_schema.as_ref() {
+                cli.ddl_options_with_target_dialect(dialect, Some(target.dialect))?
+            } else {
+                cli.ddl_options(dialect)?
             };
 
             // --out-dir: per-table diff layout. Only kicks in when there's
@@ -199,7 +128,8 @@ async fn main() -> Result<()> {
                             "--out-dir requires a target database URL to diff against"
                         ));
                     };
-                    let changes = compute_changes(&schema, target, &ddl_opts);
+                    let changes =
+                        classify_or_warn(&cli, compute_changes(&schema, target, &ddl_opts)).await?;
                     let ctx = OutputContext::now(
                         out_dir.clone(),
                         cli.name.clone(),
@@ -239,6 +169,32 @@ async fn main() -> Result<()> {
                     }
                     return Ok(());
                 }
+            }
+
+            if cli.risk_classify {
+                let Some(target) = target_schema.as_ref() else {
+                    return Err(anyhow::anyhow!(
+                        "--risk-classify requires a target database URL or @snapshot to diff against"
+                    ));
+                };
+                let changes =
+                    classify_or_warn(&cli, compute_changes(&schema, target, &ddl_opts)).await?;
+                let content = render_changes(&changes, dialect, ddl_opts.target_dialect);
+                write_output(&content, &cli.outfile)?;
+                if ddl_opts.apply {
+                    let target_url = cli.target_url.as_deref().unwrap();
+                    let target_config = cli.parse_target_connection(target_url)?;
+                    apply_inline(
+                        &target_config,
+                        &content,
+                        target_url,
+                        cli.progress.resolved(),
+                        cli.apply_retries,
+                        !cli.no_parse_check,
+                    )
+                    .await?;
+                }
+                return Ok(());
             }
 
             let gen = DdlGenerator;
@@ -290,6 +246,79 @@ async fn main() -> Result<()> {
     };
 
     Ok(())
+}
+
+async fn run_snapshot(cli: &Cli, args: &SnapshotCommand) -> Result<()> {
+    let table_filter = cli.table_filter()?;
+    let options = cli.generator_options();
+    let schema = load_schema_input(cli, &args.url, &table_filter, cli.noviews, &options).await?;
+    snapshot::write(&args.output, &schema)?;
+    eprintln!("uvg: wrote snapshot {}", args.output.display());
+    Ok(())
+}
+
+async fn load_schema_input(
+    cli: &Cli,
+    raw: &str,
+    table_filter: &TableFilter,
+    noviews: bool,
+    options: &GeneratorOptions,
+) -> Result<IntrospectedSchema> {
+    if let Some(path) = raw.strip_prefix('@') {
+        if path.is_empty() {
+            return Err(anyhow::anyhow!("snapshot input must be @<path>"));
+        }
+        let mut schema = snapshot::load(Path::new(path))?;
+        schema.tables.retain(|table| {
+            (!noviews || table.table_type != TableType::View) && table_filter.matches(&table.name)
+        });
+        return Ok(schema);
+    }
+
+    let config = cli.parse_connection_url(raw)?;
+    let schemas = schemas_for_config(cli, &config);
+    tracing::debug!("Introspecting schema...");
+    db::introspect_with_config(
+        config,
+        &schemas,
+        table_filter,
+        noviews,
+        options,
+        cli.introspect_concurrency,
+    )
+    .await
+}
+
+fn is_snapshot_input(raw: &str) -> bool {
+    raw.starts_with('@')
+}
+
+fn schemas_for_config(cli: &Cli, config: &ConnectionConfig) -> Vec<String> {
+    if let Some(db) = config.database_name() {
+        cli.schema_list_or(&db)
+    } else {
+        cli.schema_list_or(config.dialect().default_schema())
+    }
+}
+
+async fn classify_or_warn(
+    cli: &Cli,
+    changes: Vec<crate::output::Change>,
+) -> Result<Vec<crate::output::Change>> {
+    if !cli.risk_classify {
+        return Ok(changes);
+    }
+    let config = risk_classify::AnthropicConfig::from_env()?;
+    if changes.is_empty() {
+        return Ok(changes);
+    }
+    match risk_classify::classify_changes(&config, &changes).await {
+        Ok(risks) => risk_classify::annotate_changes(&changes, &risks),
+        Err(err) => {
+            eprintln!("uvg: risk classification failed: {err}; continuing without annotations");
+            Ok(changes)
+        }
+    }
 }
 
 fn write_split_output(files: &[(String, String)], outfile: &Option<String>) -> anyhow::Result<()> {

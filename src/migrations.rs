@@ -40,6 +40,7 @@ pub(crate) async fn run(cli: &Cli, command: &Command) -> Result<()> {
             Ok(())
         }
         Command::History(args) => run_history(cli, args).await,
+        Command::Snapshot(_) => unreachable!("snapshot is handled before migration dispatch"),
     }
 }
 
@@ -59,6 +60,7 @@ async fn run_revision(cli: &Cli, args: &RevisionCommand) -> Result<()> {
         &table_filter,
         cli.noviews,
         &gen_opts,
+        cli.introspect_concurrency,
     )
     .await?;
     let target = db::introspect_with_config(
@@ -67,6 +69,7 @@ async fn run_revision(cli: &Cli, args: &RevisionCommand) -> Result<()> {
         &table_filter,
         cli.noviews,
         &gen_opts,
+        cli.introspect_concurrency,
     )
     .await?;
 

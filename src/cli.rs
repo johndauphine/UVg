@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::dialect::Dialect;
+
+pub const DEFAULT_INTROSPECT_CONCURRENCY: usize = 8;
 
 /// Generate SQLAlchemy model code from an existing database.
 ///
@@ -12,6 +14,10 @@ use crate::dialect::Dialect;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Named profile from ~/.config/uvg/profiles.yaml
+    #[arg(long, env = "UVG_PROFILE")]
+    pub profile: Option<String>,
 
     /// Source database URL (e.g. postgresql://, mysql://, sqlite:///path, mssql://)
     pub url: Option<String>,
@@ -63,6 +69,14 @@ pub struct Cli {
     /// Bad DDL surfaces before any real change is made.
     #[arg(long)]
     pub no_parse_check: bool,
+
+    /// Annotate DDL diff statements with AI-generated risk classes
+    #[arg(long)]
+    pub risk_classify: bool,
+
+    /// Concurrent table metadata queries for PostgreSQL/MySQL introspection
+    #[arg(long, env = "UVG_INTROSPECT_CONCURRENCY", default_value_t = DEFAULT_INTROSPECT_CONCURRENCY, value_parser = parse_positive_usize)]
+    pub introspect_concurrency: usize,
 
     /// Tables to process (comma-delimited). Each item is a glob pattern
     /// (`*`, `?`, `[abc]`); bare names with no metacharacters match
@@ -138,6 +152,9 @@ pub enum Command {
 
     /// Show the local migration graph
     History(HistoryCommand),
+
+    /// Capture an introspected schema snapshot as YAML
+    Snapshot(SnapshotCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -238,6 +255,16 @@ pub struct HistoryCommand {
     pub migrations_dir: PathBuf,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct SnapshotCommand {
+    /// Database URL to snapshot
+    pub url: String,
+
+    /// Output snapshot YAML file
+    #[arg(long, short = 'o')]
+    pub output: PathBuf,
+}
+
 #[derive(Debug, Default)]
 pub struct GeneratorOptions {
     pub noindexes: bool,
@@ -330,7 +357,30 @@ fn ensure_mysql_charset(url: &str) -> String {
     parsed.into()
 }
 
+fn parse_positive_usize(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|e| format!("expected positive integer: {e}"))?;
+    if value == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(value)
+}
+
 impl Cli {
+    /// Parse CLI args and then apply any requested named profile.
+    ///
+    /// clap's derive parser gives us final values, but profile merging needs
+    /// to know which values came from the command line so explicit flags can
+    /// win over profile defaults.
+    pub fn parse_with_profile() -> anyhow::Result<Self> {
+        let matches = Self::command().get_matches();
+        let mut cli =
+            Self::from_arg_matches(&matches).map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        crate::profile::apply_requested_profile(&mut cli, &matches)?;
+        Ok(cli)
+    }
+
     /// Parse the comma-delimited --tables flag into a Vec of glob patterns.
     /// Bare names with no metacharacters degenerate to exact-match (back-compat
     /// with the original exact-name behavior). Empty / missing flag → empty vec.
@@ -385,9 +435,22 @@ impl Cli {
         &self,
         source_dialect: Dialect,
     ) -> Result<DdlOptions, crate::error::UvgError> {
+        self.ddl_options_with_target_dialect(source_dialect, None)
+    }
+
+    /// Build DDL-specific options with an optional already-loaded target
+    /// dialect. This matters for `@snapshot.yaml` targets, where there is no
+    /// URL scheme to infer from.
+    pub fn ddl_options_with_target_dialect(
+        &self,
+        source_dialect: Dialect,
+        target_dialect_hint: Option<Dialect>,
+    ) -> Result<DdlOptions, crate::error::UvgError> {
         let target_dialect = if let Some(ref td) = self.target_dialect {
             td.parse::<Dialect>()
                 .map_err(|e| crate::error::UvgError::InvalidDialect(e))?
+        } else if let Some(dialect) = target_dialect_hint {
+            dialect
         } else if let Some(ref target_url) = self.target_url {
             // Infer dialect from target URL scheme
             self.parse_connection_url(target_url)?.dialect()
@@ -547,10 +610,14 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn cli_with_url(url: &str) -> Cli {
         Cli {
             command: None,
+            profile: None,
             url: Some(url.to_string()),
             target_url: None,
             generator: "declarative".to_string(),
@@ -560,6 +627,8 @@ mod tests {
             progress: crate::apply_progress::ProgressMode::Auto,
             apply_retries: 3,
             no_parse_check: false,
+            risk_classify: false,
+            introspect_concurrency: DEFAULT_INTROSPECT_CONCURRENCY,
             tables: None,
             exclude_tables: None,
             schemas: None,
@@ -571,6 +640,49 @@ mod tests {
             trust_cert: false,
             interactive: false,
         }
+    }
+
+    #[test]
+    fn introspect_concurrency_defaults_to_eight() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("UVG_INTROSPECT_CONCURRENCY");
+
+        let cli = Cli::try_parse_from(["uvg", "sqlite:///tmp.db"]).unwrap();
+
+        assert_eq!(cli.introspect_concurrency, DEFAULT_INTROSPECT_CONCURRENCY);
+    }
+
+    #[test]
+    fn introspect_concurrency_flag_overrides_default() {
+        let cli = Cli::try_parse_from(["uvg", "--introspect-concurrency", "3", "sqlite:///tmp.db"])
+            .unwrap();
+
+        assert_eq!(cli.introspect_concurrency, 3);
+    }
+
+    #[test]
+    fn introspect_concurrency_env_is_supported() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("UVG_INTROSPECT_CONCURRENCY", "5");
+        let cli = Cli::try_parse_from(["uvg", "sqlite:///tmp.db"]).unwrap();
+        std::env::remove_var("UVG_INTROSPECT_CONCURRENCY");
+
+        assert_eq!(cli.introspect_concurrency, 5);
+    }
+
+    #[test]
+    fn introspect_concurrency_rejects_zero() {
+        let err = Cli::try_parse_from(["uvg", "--introspect-concurrency", "0", "sqlite:///tmp.db"])
+            .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn risk_classify_flag_parses() {
+        let cli = Cli::try_parse_from(["uvg", "--risk-classify", "sqlite:///tmp.db"]).unwrap();
+
+        assert!(cli.risk_classify);
     }
 
     #[test]
