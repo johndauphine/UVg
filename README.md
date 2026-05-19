@@ -135,6 +135,16 @@ Optional hook sections run around the main change: `-- PRE`, `-- UP`, `-- POST`,
 
 Branched histories are supported through explicit merge revisions. When `uvg history` shows multiple heads, run `uvg merge --message <name>` to write an empty multi-parent merge revision that restores a single head. Automatic downgrade through merge revisions is refused because `uvg_version` records one current revision; resolve that case manually and use `uvg stamp`.
 
+#### Migration safety model
+
+`uvg upgrade` and `uvg downgrade` parse-check migration SQL before applying it when the target dialect has a reliable parse-only mode. PostgreSQL uses a savepoint per statement inside one rolled-back transaction, so it catches syntax and catalog errors. SQL Server uses `SET PARSEONLY ON`, which catches syntax errors but still defers name resolution to execution. MySQL and SQLite do not expose a safe parse-only DDL mode, so UVg prints a one-line skip note and continues. Pass `--no-parse-check` before the subcommand to disable this phase explicitly.
+
+Migration DDL is applied statement-by-statement, not as one cross-dialect transaction. On failure, UVg stops at the first failed statement and prints the migration revision, section, statement number, dialect error, and failed SQL without printing the target URL. Earlier statements in the same migration may already be applied. `uvg_version` is advanced only after all `-- PRE`, `-- UP`, and `-- POST` SQL succeeds; downgrades move or clear `uvg_version` only after all down SQL succeeds.
+
+Recovery is intentionally explicit: fix the target manually if needed, rerun an idempotent migration once the target is safe, or use `uvg stamp <target-url> <revision> --yes` only after verifying the schema already matches that revision. If a downgrade to base applied but clearing `uvg_version` failed, verify the target and clear `uvg_version` manually.
+
+Statement retry is bounded and only applies to transient execution errors such as deadlocks, lock waits, and brief connection drops. Logical errors such as syntax errors, missing objects, and constraint failures are not retried. Generated rollback SQL marks unknown or destructive reversals with `-- IRREVERSIBLE:`; `uvg downgrade` refuses those sections until they are replaced with real rollback SQL.
+
 ### Per-table migration layout (`--out-dir`)
 
 The default DDL diff path writes one blob to stdout (or `--outfile`). For migrations you commit to git, `--out-dir` splits the output one file per table so `git log -- migrations/users/` is the history of the `users` table.
@@ -348,6 +358,9 @@ Integration tests require a live database (except SQLite which runs in-memory):
 ```bash
 # PostgreSQL
 DATABASE_URL=postgresql://user:pass@localhost/testdb cargo test --test integration -- --ignored
+
+# PostgreSQL versioned migration workflow on a disposable database
+UVG_DISPOSABLE_PG_URL=postgresql://user:pass@localhost/testdb cargo test --test integration test_versioned_migration_live_postgres_workflow_cli -- --ignored
 
 # MySQL
 MYSQL_URL=mysql://user:pass@localhost/testdb cargo test --test integration -- --ignored
