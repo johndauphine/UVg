@@ -99,6 +99,13 @@ uvg revision postgresql://source/db postgresql://target/db \
 # Apply pending revisions to the target and update uvg_version
 uvg upgrade postgresql://target/db
 
+# Roll back one revision, or back to a named revision/base
+uvg downgrade postgresql://target/db
+uvg downgrade postgresql://target/db base
+
+# Collapse multiple migration heads into one merge revision
+uvg merge --message "merge active migration branches"
+
 # Adopt an already-current target without running migration SQL
 uvg stamp postgresql://target/db 20260519_141500 --yes
 
@@ -119,9 +126,14 @@ Revision files use a simple SQL format:
 
 -- UP
 ALTER TABLE "users" ADD COLUMN "email" VARCHAR(255);
+
+-- DOWN
+ALTER TABLE "users" DROP COLUMN "email";
 ```
 
-The first implementation supports a single linear revision chain. Branched heads, merge revisions, and down migrations are tracked as separate follow-up issues.
+Optional hook sections run around the main change: `-- PRE`, `-- UP`, `-- POST`, then `uvg_version` is bumped. Downgrades run `-- POST DOWN`, `-- DOWN`, `-- PRE DOWN` before moving the recorded revision back. Generated irreversible down sections are marked with `-- IRREVERSIBLE:` and are refused by `uvg downgrade` until the user replaces them with real rollback SQL.
+
+Branched histories are supported through explicit merge revisions. When `uvg history` shows multiple heads, run `uvg merge --message <name>` to write an empty multi-parent merge revision that restores a single head. Automatic downgrade through merge revisions is refused because `uvg_version` records one current revision; resolve that case manually and use `uvg stamp`.
 
 ### Per-table migration layout (`--out-dir`)
 

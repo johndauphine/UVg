@@ -165,6 +165,139 @@ mod tests {
             .expect("spawn uvg")
     }
 
+    async fn sqlite_table_exists(db_path: &Path, table: &str) -> bool {
+        let url = format!("sqlite:///{}", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("sqlite connect");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .expect("sqlite table lookup");
+        pool.close().await;
+        count > 0
+    }
+
+    #[tokio::test]
+    async fn test_versioned_migration_upgrade_downgrade_round_trip_cli() {
+        let dir = tmpdir("versioned-round-trip");
+        let target = dir.join("target.db");
+        std::fs::File::create(&target).unwrap();
+        let migrations = dir.join("migrations");
+        std::fs::create_dir_all(&migrations).unwrap();
+        std::fs::write(
+            migrations.join("20260513_193000_create_users.sql"),
+            "-- uvg revision: 20260513_193000\n\
+             -- parent:\n\
+             -- description: create users\n\n\
+             -- UP\n\
+             CREATE TABLE users(id INTEGER PRIMARY KEY);\n\n\
+             -- DOWN\n\
+             DROP TABLE users;\n",
+        )
+        .unwrap();
+
+        let target_url = format!("sqlite:///{}", target.display());
+        let migrations_arg = migrations.display().to_string();
+
+        let out = run_uvg(&["upgrade", &target_url, "--migrations-dir", &migrations_arg]);
+        assert!(
+            out.status.success(),
+            "upgrade failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(sqlite_table_exists(&target, "users").await);
+
+        let out = run_uvg(&[
+            "downgrade",
+            &target_url,
+            "base",
+            "--migrations-dir",
+            &migrations_arg,
+        ]);
+        assert!(
+            out.status.success(),
+            "downgrade failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!sqlite_table_exists(&target, "users").await);
+
+        let out = run_uvg(&["upgrade", &target_url, "--migrations-dir", &migrations_arg]);
+        assert!(
+            out.status.success(),
+            "second upgrade failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(sqlite_table_exists(&target, "users").await);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_versioned_merge_writes_multi_parent_revision_cli() {
+        let dir = tmpdir("versioned-merge");
+        let migrations = dir.join("migrations");
+        std::fs::create_dir_all(&migrations).unwrap();
+        std::fs::write(
+            migrations.join("20260513_193000_branch_a.sql"),
+            "-- uvg revision: 20260513_193000\n\
+             -- parent:\n\
+             -- description: branch a\n\n\
+             -- UP\n\
+             -- empty\n\n\
+             -- DOWN\n\
+             -- empty\n",
+        )
+        .unwrap();
+        std::fs::write(
+            migrations.join("20260513_194000_branch_b.sql"),
+            "-- uvg revision: 20260513_194000\n\
+             -- parent:\n\
+             -- description: branch b\n\n\
+             -- UP\n\
+             -- empty\n\n\
+             -- DOWN\n\
+             -- empty\n",
+        )
+        .unwrap();
+
+        let migrations_arg = migrations.display().to_string();
+        let out = run_uvg(&[
+            "merge",
+            "--message",
+            "merge branches",
+            "--migrations-dir",
+            &migrations_arg,
+        ]);
+        assert!(
+            out.status.success(),
+            "merge failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let mut merge_files = std::fs::read_dir(&migrations)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("merge-branches"))
+            })
+            .collect::<Vec<_>>();
+        merge_files.sort();
+        assert_eq!(merge_files.len(), 1);
+        let body = std::fs::read_to_string(&merge_files[0]).unwrap();
+        assert!(body.contains("-- parents: 20260513_193000, 20260513_194000"));
+        assert!(body.contains("-- DOWN"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn test_out_dir_first_run_then_noop() {
         let dir = tmpdir("outdir-first-then-noop");

@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 
 use crate::cli::{
-    Cli, Command, ConnectionConfig, DdlOptions, HistoryCommand, RevisionCommand, StampCommand,
-    UpgradeCommand,
+    Cli, Command, ConnectionConfig, DdlOptions, DowngradeCommand, HistoryCommand, MergeCommand,
+    RevisionCommand, StampCommand, UpgradeCommand,
 };
 use crate::codegen::ddl_diff::compute_changes;
 use crate::db;
@@ -28,6 +28,8 @@ pub(crate) async fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Init(args) => crate::init::run(args),
         Command::Revision(args) => run_revision(cli, args).await,
         Command::Upgrade(args) => run_upgrade(cli, args).await,
+        Command::Downgrade(args) => run_downgrade(cli, args).await,
+        Command::Merge(args) => run_merge(args),
         Command::Stamp(args) => run_stamp(cli, args).await,
         Command::Current(args) => {
             let config = cli.parse_connection_url(&args.target_url)?;
@@ -132,6 +134,68 @@ async fn run_upgrade(cli: &Cli, args: &UpgradeCommand) -> Result<()> {
     Ok(())
 }
 
+async fn run_downgrade(cli: &Cli, args: &DowngradeCommand) -> Result<()> {
+    let graph = MigrationGraph::load(&args.migrations_dir)?;
+    if graph.is_empty() {
+        eprintln!(
+            "uvg: no migrations found in {}",
+            args.migrations_dir.display()
+        );
+        return Ok(());
+    }
+    let config = cli.parse_connection_url(&args.target_url)?;
+
+    ensure_version_table(&config).await?;
+    let current = current_revision(&config).await?;
+    let plan = graph.plan_downgrade(current.as_deref(), args.revision.as_deref())?;
+    if plan.is_empty() {
+        let label = current.as_deref().unwrap_or("base");
+        eprintln!("uvg: already at {label}");
+        return Ok(());
+    }
+
+    for migration in plan {
+        apply_down_migration(&config, migration).await?;
+        if let Some(parent) = migration.parents.first() {
+            record_revision(&config, parent, parent_description(&graph, parent)).await?;
+            eprintln!("uvg: downgraded {} -> {}", migration.revision, parent);
+        } else {
+            clear_revision(&config).await?;
+            eprintln!("uvg: downgraded {} -> base", migration.revision);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_merge(args: &MergeCommand) -> Result<()> {
+    let graph = MigrationGraph::load(&args.migrations_dir)?;
+    let heads = graph.heads();
+    if heads.len() < 2 {
+        return Err(anyhow!(
+            "uvg merge requires at least two heads; current heads: {}",
+            if heads.is_empty() {
+                "(none)".to_string()
+            } else {
+                heads.join(", ")
+            }
+        ));
+    }
+
+    let revision = next_revision_id(&graph);
+    let path = write_merge_revision_file(&args.migrations_dir, &revision, &heads, &args.message)?;
+    let refreshed = MigrationGraph::load(&args.migrations_dir)?;
+    write_meta_file(&args.migrations_dir, &refreshed)?;
+
+    println!("Wrote: {}", path.display());
+    eprintln!(
+        "uvg: merge revision {} joins heads {}",
+        revision,
+        heads.join(", ")
+    );
+    Ok(())
+}
+
 async fn run_stamp(cli: &Cli, args: &StampCommand) -> Result<()> {
     let graph = MigrationGraph::load(&args.migrations_dir)?;
     let migration = graph.require_revision(&args.revision)?;
@@ -175,10 +239,12 @@ async fn run_history(cli: &Cli, args: &HistoryCommand) -> Result<()> {
     let heads: HashSet<String> = graph.heads().into_iter().collect();
 
     for migration in graph.ordered() {
-        let parent = if migration.parents.is_empty() {
-            "base".to_string()
+        let (parent_label, parent_value) = if migration.parents.is_empty() {
+            ("parent", "base".to_string())
+        } else if migration.parents.len() == 1 {
+            ("parent", migration.parents[0].clone())
         } else {
-            migration.parents.join(",")
+            ("parents", migration.parents.join(","))
         };
         let mut markers = Vec::new();
         if applied.contains(&migration.revision) {
@@ -196,8 +262,8 @@ async fn run_history(cli: &Cli, args: &HistoryCommand) -> Result<()> {
             format!(" [{}]", markers.join(", "))
         };
         println!(
-            "{}  {}  (parent: {}){}",
-            migration.revision, migration.description, parent, suffix
+            "{}  {}  ({}: {}){}",
+            migration.revision, migration.description, parent_label, parent_value, suffix
         );
     }
 
@@ -218,7 +284,35 @@ struct MigrationFile {
     parents: Vec<String>,
     description: String,
     path: PathBuf,
+    pre_sql: String,
     up_sql: String,
+    post_sql: String,
+    pre_down_sql: String,
+    down_sql: Option<String>,
+    post_down_sql: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MigrationSection {
+    Pre,
+    Up,
+    Post,
+    PostDown,
+    Down,
+    PreDown,
+}
+
+impl MigrationSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pre => "PRE",
+            Self::Up => "UP",
+            Self::Post => "POST",
+            Self::PostDown => "POST DOWN",
+            Self::Down => "DOWN",
+            Self::PreDown => "PRE DOWN",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -273,7 +367,7 @@ impl MigrationGraph {
             0 => Ok(None),
             1 => Ok(heads.into_iter().next()),
             _ => Err(anyhow!(
-                "multiple migration heads found: {}. `uvg merge` is not implemented yet",
+                "multiple migration heads found: {}. Run `uvg merge --message <name>` or pass an explicit revision",
                 heads.join(", ")
             )),
         }
@@ -341,63 +435,151 @@ impl MigrationGraph {
         let Some(target_revision) = target else {
             return Ok(Vec::new());
         };
-        let mut chain = Vec::new();
-        let mut cursor = Some(target_revision.to_string());
-
-        while let Some(revision) = cursor {
-            if current == Some(revision.as_str()) {
-                chain.reverse();
-                return Ok(chain);
-            }
-            let migration = self
-                .migrations
-                .get(&revision)
-                .ok_or_else(|| anyhow!("migration `{revision}` is missing from the graph"))?;
-            if migration.parents.len() > 1 {
+        let target_ancestors = self.ancestor_set(target_revision)?;
+        let current_ancestors = if let Some(current_revision) = current {
+            if !target_ancestors.contains(current_revision) {
                 return Err(anyhow!(
-                    "revision `{}` has multiple parents; merge migrations are not supported yet",
-                    migration.revision
+                    "revision `{}` is not an ancestor of `{}`; branched upgrade paths are not supported yet",
+                    current_revision,
+                    target_revision
                 ));
             }
-            chain.push(migration);
-            cursor = migration.parents.first().cloned();
+            self.ancestor_set(current_revision)?
+        } else {
+            HashSet::new()
+        };
+        let pending: HashSet<&str> = target_ancestors
+            .iter()
+            .map(String::as_str)
+            .filter(|revision| !current_ancestors.contains(*revision))
+            .collect();
+
+        Ok(self
+            .ordered()
+            .into_iter()
+            .filter(|migration| pending.contains(migration.revision.as_str()))
+            .collect())
+    }
+
+    fn plan_downgrade<'a>(
+        &'a self,
+        current: Option<&str>,
+        requested: Option<&str>,
+    ) -> Result<Vec<&'a MigrationFile>> {
+        let Some(current_revision) = current else {
+            if matches!(requested, None | Some("base")) {
+                return Ok(Vec::new());
+            }
+            return Err(anyhow!(
+                "target database has no current revision; cannot downgrade to `{}`",
+                requested.unwrap_or("base")
+            ));
+        };
+        let current_migration = self.require_revision(current_revision)?;
+
+        if requested.is_none() {
+            if current_migration.parents.len() > 1 {
+                return Err(anyhow!(
+                    "cannot downgrade through merge revision `{}` because uvg_version tracks a single current revision; resolve manually and use `uvg stamp`",
+                    current_migration.revision
+                ));
+            }
+            return Ok(vec![current_migration]);
         }
 
-        if current.is_none() {
-            chain.reverse();
-            return Ok(chain);
+        let target = match requested {
+            Some("base") => None,
+            Some(revision) => {
+                self.require_revision(revision)?;
+                Some(revision)
+            }
+            None => unreachable!(),
+        };
+        if target == Some(current_revision) {
+            return Ok(Vec::new());
         }
 
-        let current_revision = current.unwrap_or("base");
-        Err(anyhow!(
-            "revision `{}` is not an ancestor of `{}`; branched upgrade paths are not supported yet",
-            current_revision,
-            target_revision
-        ))
+        let current_ancestors = self.ancestor_set(current_revision)?;
+        let target_ancestors = if let Some(target_revision) = target {
+            if !current_ancestors.contains(target_revision) {
+                return Err(anyhow!(
+                    "revision `{}` is not an ancestor of `{}`; cannot downgrade across unrelated branches",
+                    target_revision,
+                    current_revision
+                ));
+            }
+            self.ancestor_set(target_revision)?
+        } else {
+            HashSet::new()
+        };
+        let pending: HashSet<&str> = current_ancestors
+            .iter()
+            .map(String::as_str)
+            .filter(|revision| !target_ancestors.contains(*revision))
+            .collect();
+
+        let plan = self
+            .ordered()
+            .into_iter()
+            .rev()
+            .filter(|migration| pending.contains(migration.revision.as_str()))
+            .collect::<Vec<_>>();
+        if let Some(merge) = plan.iter().find(|migration| migration.parents.len() > 1) {
+            return Err(anyhow!(
+                "cannot downgrade through merge revision `{}` because uvg_version tracks a single current revision; resolve manually and use `uvg stamp`",
+                merge.revision
+            ));
+        }
+
+        Ok(plan)
     }
 
     fn ordered(&self) -> Vec<&MigrationFile> {
-        let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
+        let mut indegree: HashMap<String, usize> = self
+            .migrations
+            .keys()
+            .map(|revision| (revision.clone(), 0))
+            .collect();
+        let mut children: HashMap<String, Vec<String>> = HashMap::new();
         for migration in self.migrations.values() {
-            let parent = migration.parents.first().cloned();
-            children
-                .entry(parent)
-                .or_default()
-                .push(migration.revision.clone());
+            for parent in &migration.parents {
+                if self.migrations.contains_key(parent) {
+                    *indegree.entry(migration.revision.clone()).or_default() += 1;
+                    children
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(migration.revision.clone());
+                }
+            }
         }
         for revisions in children.values_mut() {
             revisions.sort();
         }
 
         let mut ordered = Vec::new();
-        let mut stack = children.remove(&None).unwrap_or_default();
-        stack.reverse();
-        while let Some(revision) = stack.pop() {
+        let mut ready: BTreeSet<String> = indegree
+            .iter()
+            .filter_map(|(revision, count)| {
+                if *count == 0 {
+                    Some(revision.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        while let Some(revision) = ready.iter().next().cloned() {
+            ready.remove(&revision);
             if let Some(migration) = self.migrations.get(&revision) {
                 ordered.push(migration);
-                if let Some(mut kids) = children.remove(&Some(revision.clone())) {
-                    kids.reverse();
-                    stack.extend(kids);
+                if let Some(kids) = children.get(&revision) {
+                    for child in kids {
+                        if let Some(count) = indegree.get_mut(child) {
+                            *count -= 1;
+                            if *count == 0 {
+                                ready.insert(child.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -422,14 +604,18 @@ impl MigrationGraph {
             ));
         }
         let mut seen = HashSet::new();
-        let mut cursor = Some(revision.to_string());
-        while let Some(rev) = cursor {
+        let mut stack = vec![revision.to_string()];
+        while let Some(rev) = stack.pop() {
+            if !seen.insert(rev.clone()) {
+                continue;
+            }
             let migration = self
                 .migrations
                 .get(&rev)
                 .ok_or_else(|| anyhow!("migration `{rev}` is missing from the graph"))?;
-            seen.insert(rev.clone());
-            cursor = migration.parents.first().cloned();
+            for parent in &migration.parents {
+                stack.push(parent.clone());
+            }
         }
         Ok(seen)
     }
@@ -451,20 +637,18 @@ fn parse_migration_file(body: &str, path: PathBuf) -> Result<MigrationFile> {
     let mut revision = None;
     let mut parents: Option<Vec<String>> = None;
     let mut description = String::new();
-    let mut in_up = false;
-    let mut up_lines = Vec::new();
+    let mut current_section = None;
+    let mut section_lines: HashMap<MigrationSection, Vec<&str>> = HashMap::new();
 
     for line in body.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("-- UP") {
-            in_up = true;
+        if let Some(section) = section_marker(trimmed) {
+            current_section = Some(section);
+            section_lines.entry(section).or_default();
             continue;
         }
-        if in_up && is_section_marker(trimmed) {
-            break;
-        }
-        if in_up {
-            up_lines.push(line);
+        if let Some(section) = current_section {
+            section_lines.entry(section).or_default().push(line);
             continue;
         }
 
@@ -490,34 +674,51 @@ fn parse_migration_file(body: &str, path: PathBuf) -> Result<MigrationFile> {
         }
     }
 
+    let section_sql = |section| {
+        section_lines
+            .get(&section)
+            .map(|lines| lines.join("\n").trim().to_string())
+            .unwrap_or_default()
+    };
     let revision = revision.ok_or_else(|| {
         anyhow!(
             "migration {} is missing `-- uvg revision:` header",
             path.display()
         )
     })?;
-    if !in_up {
+    if !section_lines.contains_key(&MigrationSection::Up) {
         return Err(anyhow!(
             "migration {} is missing required `-- UP` section",
             path.display()
         ));
     }
-    let up_sql = up_lines.join("\n").trim().to_string();
 
     Ok(MigrationFile {
         revision,
         parents: parents.unwrap_or_default(),
         description,
         path,
-        up_sql,
+        pre_sql: section_sql(MigrationSection::Pre),
+        up_sql: section_sql(MigrationSection::Up),
+        post_sql: section_sql(MigrationSection::Post),
+        pre_down_sql: section_sql(MigrationSection::PreDown),
+        down_sql: section_lines
+            .contains_key(&MigrationSection::Down)
+            .then(|| section_sql(MigrationSection::Down)),
+        post_down_sql: section_sql(MigrationSection::PostDown),
     })
 }
 
-fn is_section_marker(trimmed: &str) -> bool {
-    matches!(
-        trimmed.to_ascii_uppercase().as_str(),
-        "-- PRE" | "-- POST" | "-- DOWN" | "-- POST DOWN" | "-- PRE DOWN"
-    )
+fn section_marker(trimmed: &str) -> Option<MigrationSection> {
+    match trimmed.to_ascii_uppercase().as_str() {
+        "-- PRE" => Some(MigrationSection::Pre),
+        "-- UP" => Some(MigrationSection::Up),
+        "-- POST" => Some(MigrationSection::Post),
+        "-- POST DOWN" => Some(MigrationSection::PostDown),
+        "-- DOWN" => Some(MigrationSection::Down),
+        "-- PRE DOWN" => Some(MigrationSection::PreDown),
+        _ => None,
+    }
 }
 
 fn write_revision_file(
@@ -560,6 +761,57 @@ fn write_revision_file(
     if !body.ends_with('\n') {
         body.push('\n');
     }
+    body.push('\n');
+    body.push_str("-- DOWN\n");
+    body.push_str(&render_down_sql(changes, target_dialect));
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+
+    fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_merge_revision_file(
+    migrations_dir: &Path,
+    revision: &str,
+    parents: &[String],
+    description: &str,
+) -> Result<PathBuf> {
+    fs::create_dir_all(migrations_dir)
+        .with_context(|| format!("failed to create {}", migrations_dir.display()))?;
+    let filename = format!("{}_{}.sql", revision, slugify(description));
+    let path = migrations_dir.join(filename);
+    if path.exists() {
+        return Err(anyhow!(
+            "refusing to overwrite existing migration {}",
+            path.display()
+        ));
+    }
+
+    let mut body = String::new();
+    body.push_str(&format!(
+        "-- uvg revision: {}\n",
+        flatten_for_comment(revision)
+    ));
+    body.push_str(&format!(
+        "-- parents: {}\n",
+        parents
+            .iter()
+            .map(|parent| flatten_for_comment(parent))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    body.push_str(&format!(
+        "-- description: {}\n\n",
+        flatten_for_comment(description)
+    ));
+    body.push_str("-- UP\n");
+    body.push_str("-- Empty merge revision. Branch migrations already carry the SQL.\n\n");
+    body.push_str("-- DOWN\n");
+    body.push_str(
+        "-- Merge downgrade is not automatic because uvg_version tracks one current revision.\n",
+    );
 
     fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
@@ -581,10 +833,17 @@ fn write_meta_file(migrations_dir: &Path, graph: &MigrationGraph) -> Result<()> 
             "  - revision: {}\n",
             yaml_quote(&migration.revision)
         ));
-        body.push_str(&format!(
-            "    parent: {}\n",
-            yaml_quote(migration.parents.first().map(String::as_str).unwrap_or(""))
-        ));
+        if migration.parents.len() > 1 {
+            body.push_str(&format!(
+                "    parents: {}\n",
+                yaml_inline_list(&migration.parents)
+            ));
+        } else {
+            body.push_str(&format!(
+                "    parent: {}\n",
+                yaml_quote(migration.parents.first().map(String::as_str).unwrap_or(""))
+            ));
+        }
         body.push_str(&format!(
             "    description: {}\n",
             yaml_quote(&migration.description)
@@ -605,6 +864,182 @@ fn render_up_sql(changes: &[Change]) -> String {
         .map(|change| change.sql.as_str())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn render_down_sql(changes: &[Change], target_dialect: Dialect) -> String {
+    let mut reversed = changes
+        .iter()
+        .rev()
+        .map(|change| reverse_change_sql(&change.sql, target_dialect))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if reversed.is_empty() {
+        reversed.push_str("-- No reverse SQL generated.");
+    }
+    reversed
+}
+
+fn reverse_change_sql(sql: &str, target_dialect: Dialect) -> String {
+    let Some(statement) = executable_statement(sql) else {
+        return "-- IRREVERSIBLE: no executable SQL found to reverse.".to_string();
+    };
+    let upper = statement.to_ascii_uppercase();
+
+    if upper.starts_with("CREATE TABLE ") {
+        let rest = statement["CREATE TABLE".len()..].trim();
+        let table = rest
+            .split_once('(')
+            .map(|(name, _)| name)
+            .unwrap_or(rest)
+            .trim();
+        return format!("DROP TABLE IF EXISTS {table};");
+    }
+    if upper.starts_with("DROP TABLE ") {
+        return irreversible_down(
+            "this migration drops a table; original schema/data is lost",
+            sql,
+        );
+    }
+    if upper.starts_with("ALTER TABLE ") {
+        if let Some(reverse) = reverse_alter_table_add_column(&statement, target_dialect) {
+            return reverse;
+        }
+        if upper.contains(" DROP COLUMN ") {
+            return irreversible_down("this migration drops a column; column data is lost", sql);
+        }
+    }
+    if upper.starts_with("CREATE INDEX ") || upper.starts_with("CREATE UNIQUE INDEX ") {
+        if let Some(reverse) = reverse_create_index(&statement, target_dialect) {
+            return reverse;
+        }
+    }
+    if upper.starts_with("DROP INDEX ") {
+        return irreversible_down(
+            "this migration drops an index; original definition is not available here",
+            sql,
+        );
+    }
+
+    irreversible_down("uvg cannot automatically reverse this statement", sql)
+}
+
+fn executable_statement(sql: &str) -> Option<String> {
+    let statement = sql
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if statement.is_empty() {
+        None
+    } else {
+        Some(statement)
+    }
+}
+
+fn reverse_alter_table_add_column(statement: &str, target_dialect: Dialect) -> Option<String> {
+    let upper = statement.to_ascii_uppercase();
+    let add_idx = upper.find(" ADD COLUMN ").or_else(|| {
+        if target_dialect == Dialect::Mssql {
+            upper.find(" ADD ")
+        } else {
+            None
+        }
+    })?;
+    let table = statement["ALTER TABLE".len()..add_idx].trim();
+    let after_add = if upper[add_idx..].starts_with(" ADD COLUMN ") {
+        &statement[add_idx + " ADD COLUMN ".len()..]
+    } else {
+        &statement[add_idx + " ADD ".len()..]
+    };
+    let column = first_sql_token(after_add)?;
+    let column_upper = column
+        .trim_matches(|c| matches!(c, '"' | '`' | '[' | ']'))
+        .to_ascii_uppercase();
+    if matches!(column_upper.as_str(), "CONSTRAINT" | "DEFAULT" | "CHECK") {
+        return None;
+    }
+    Some(format!("ALTER TABLE {table} DROP COLUMN {column};"))
+}
+
+fn reverse_create_index(statement: &str, target_dialect: Dialect) -> Option<String> {
+    let upper = statement.to_ascii_uppercase();
+    let prefix_len = if upper.starts_with("CREATE UNIQUE INDEX ") {
+        "CREATE UNIQUE INDEX ".len()
+    } else {
+        "CREATE INDEX ".len()
+    };
+    let rest = &statement[prefix_len..];
+    let on_idx = rest.to_ascii_uppercase().find(" ON ")?;
+    let index = rest[..on_idx].trim();
+    if matches!(target_dialect, Dialect::Mysql | Dialect::Mssql) && index.contains('.') {
+        return None;
+    }
+    let after_on = rest[on_idx + " ON ".len()..].trim();
+    let table = after_on
+        .split_once('(')
+        .map(|(table, _)| table)
+        .unwrap_or(after_on)
+        .trim();
+    match target_dialect {
+        Dialect::Mysql | Dialect::Mssql => Some(format!("DROP INDEX {index} ON {table};")),
+        Dialect::Postgres | Dialect::Sqlite => Some(format!("DROP INDEX {index};")),
+    }
+}
+
+fn first_sql_token(input: &str) -> Option<&str> {
+    let input = input.trim_start();
+    let mut chars = input.char_indices();
+    match chars.next()? {
+        (_, '"') => quoted_sql_token(input, '"'),
+        (_, '`') => quoted_sql_token(input, '`'),
+        (_, '[') => bracketed_sql_token(input),
+        _ => input
+            .find(|c: char| c.is_whitespace() || c == ';' || c == ',')
+            .map(|idx| &input[..idx])
+            .or(Some(input)),
+    }
+}
+
+fn quoted_sql_token(input: &str, quote: char) -> Option<&str> {
+    let mut chars = input.char_indices().peekable();
+    chars.next()?;
+    while let Some((idx, ch)) = chars.next() {
+        if ch == quote {
+            if chars.peek().is_some_and(|(_, next)| *next == quote) {
+                chars.next();
+                continue;
+            }
+            return Some(&input[..idx + ch.len_utf8()]);
+        }
+    }
+    None
+}
+
+fn bracketed_sql_token(input: &str) -> Option<&str> {
+    let mut chars = input.char_indices().peekable();
+    chars.next()?;
+    while let Some((idx, ch)) = chars.next() {
+        if ch == ']' {
+            if chars.peek().is_some_and(|(_, next)| *next == ']') {
+                chars.next();
+                continue;
+            }
+            return Some(&input[..idx + ch.len_utf8()]);
+        }
+    }
+    None
+}
+
+fn irreversible_down(reason: &str, original_sql: &str) -> String {
+    format!(
+        "-- IRREVERSIBLE: {reason}.\n-- Original SQL:\n{}",
+        original_sql
+            .lines()
+            .map(|line| format!("--   {}", flatten_for_comment(line)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 fn next_revision_id(graph: &MigrationGraph) -> String {
@@ -672,13 +1107,80 @@ fn yaml_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+fn yaml_inline_list(values: &[String]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| yaml_quote(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 async fn apply_migration(config: &ConnectionConfig, migration: &MigrationFile) -> Result<()> {
-    let results = db::execute_ddl(config, &migration.up_sql, 3, |_, _, _| {}).await?;
+    execute_migration_section(config, migration, MigrationSection::Pre, &migration.pre_sql).await?;
+    execute_migration_section(config, migration, MigrationSection::Up, &migration.up_sql).await?;
+    execute_migration_section(
+        config,
+        migration,
+        MigrationSection::Post,
+        &migration.post_sql,
+    )
+    .await
+}
+
+async fn apply_down_migration(config: &ConnectionConfig, migration: &MigrationFile) -> Result<()> {
+    let down_sql = migration.down_sql.as_deref().ok_or_else(|| {
+        anyhow!(
+            "uvg: migration {} in {} is missing required DOWN section",
+            migration.revision,
+            migration.path.display()
+        )
+    })?;
+    if down_sql
+        .lines()
+        .any(|line| line.trim_start().starts_with("-- IRREVERSIBLE:"))
+    {
+        return Err(anyhow!(
+            "uvg: migration {} in {} has an irreversible DOWN section; refusing to change uvg_version",
+            migration.revision,
+            migration.path.display()
+        ));
+    }
+    execute_migration_section(
+        config,
+        migration,
+        MigrationSection::PostDown,
+        &migration.post_down_sql,
+    )
+    .await?;
+    execute_migration_section(config, migration, MigrationSection::Down, down_sql).await?;
+    execute_migration_section(
+        config,
+        migration,
+        MigrationSection::PreDown,
+        &migration.pre_down_sql,
+    )
+    .await
+}
+
+async fn execute_migration_section(
+    config: &ConnectionConfig,
+    migration: &MigrationFile,
+    section: MigrationSection,
+    sql: &str,
+) -> Result<()> {
+    if sql.trim().is_empty() {
+        return Ok(());
+    }
+    let results = db::execute_ddl(config, sql, 3, |_, _, _| {}).await?;
     let applied = results.iter().take_while(|r| r.error.is_none()).count();
     if let Some(failed) = results.iter().find(|r| r.error.is_some()) {
         return Err(anyhow!(
-            "uvg: migration {} failed in {} at statement {}/{}: {}\n--- SQL ---\n{}",
+            "uvg: migration {} failed in {} section of {} at statement {}/{}: {}\n--- SQL ---\n{}",
             migration.revision,
+            section.label(),
             migration.path.display(),
             applied + 1,
             results.len(),
@@ -687,6 +1189,14 @@ async fn apply_migration(config: &ConnectionConfig, migration: &MigrationFile) -
         ));
     }
     Ok(())
+}
+
+fn parent_description<'a>(graph: &'a MigrationGraph, parent: &str) -> &'a str {
+    graph
+        .migrations
+        .get(parent)
+        .map(|migration| migration.description.as_str())
+        .unwrap_or("")
 }
 
 async fn stamp_revision(config: &ConnectionConfig, migration: &MigrationFile) -> Result<()> {
@@ -1049,6 +1559,63 @@ async fn record_revision(
     Ok(())
 }
 
+async fn clear_revision(config: &ConnectionConfig) -> Result<()> {
+    match config {
+        ConnectionConfig::Postgres(url) => {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(url)
+                .await?;
+            sqlx::query(&format!("DELETE FROM {VERSION_TABLE}"))
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+        }
+        ConnectionConfig::Mysql(url) => {
+            let pool = sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(1)
+                .connect(url)
+                .await?;
+            sqlx::query(&format!("DELETE FROM {VERSION_TABLE}"))
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+        }
+        ConnectionConfig::Sqlite(url) => {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(url)
+                .await?;
+            sqlx::query(&format!("DELETE FROM {VERSION_TABLE}"))
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+        }
+        ConnectionConfig::Mssql {
+            host,
+            port,
+            database,
+            user,
+            password,
+            trust_cert,
+        } => {
+            let mut client = crate::introspect::mssql::connect(
+                host,
+                *port,
+                database,
+                user,
+                password,
+                *trust_cert,
+            )
+            .await?;
+            client
+                .execute(&format!("DELETE FROM {VERSION_TABLE}"), &[])
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1071,8 +1638,23 @@ mod tests {
 
     fn migration(revision: &str, parent: &str, description: &str) -> String {
         format!(
-            "-- uvg revision: {revision}\n-- parent: {parent}\n-- description: {description}\n\n-- UP\nCREATE TABLE t_{revision}(id integer);\n"
+            "-- uvg revision: {revision}\n-- parent: {parent}\n-- description: {description}\n\n-- UP\nCREATE TABLE t_{revision}(id integer);\n\n-- DOWN\nDROP TABLE t_{revision};\n"
         )
+    }
+
+    fn migration_file(revision: &str, up_sql: &str, down_sql: Option<&str>) -> MigrationFile {
+        MigrationFile {
+            revision: revision.into(),
+            parents: Vec::new(),
+            description: "test".into(),
+            path: PathBuf::from(format!("migrations/{revision}_test.sql")),
+            pre_sql: String::new(),
+            up_sql: up_sql.into(),
+            post_sql: String::new(),
+            pre_down_sql: String::new(),
+            down_sql: down_sql.map(str::to_string),
+            post_down_sql: String::new(),
+        }
     }
 
     #[test]
@@ -1100,6 +1682,47 @@ mod tests {
         assert_eq!(parsed.path, path);
         assert!(parsed.up_sql.contains("CREATE TABLE users"));
         assert!(!parsed.up_sql.contains("DROP TABLE"));
+        assert_eq!(parsed.down_sql.as_deref(), Some("DROP TABLE users;"));
+    }
+
+    #[test]
+    fn test_parse_migration_file_captures_hooks_and_down_sections() {
+        let parsed = parse_migration_file(
+            "-- uvg revision: 20260513_193000\n\
+             -- parents: 20260512_100000, 20260512_110000\n\
+             -- description: hooks\n\n\
+             -- PRE\n\
+             INSERT INTO log VALUES ('pre');\n\n\
+             -- UP\n\
+             INSERT INTO log VALUES ('up');\n\n\
+             -- POST\n\
+             INSERT INTO log VALUES ('post');\n\n\
+             -- POST DOWN\n\
+             INSERT INTO log VALUES ('post down');\n\n\
+             -- DOWN\n\
+             INSERT INTO log VALUES ('down');\n\n\
+             -- PRE DOWN\n\
+             INSERT INTO log VALUES ('pre down');\n",
+            PathBuf::from("migrations/20260513_193000_hooks.sql"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.parents,
+            vec!["20260512_100000".to_string(), "20260512_110000".to_string()]
+        );
+        assert_eq!(parsed.pre_sql, "INSERT INTO log VALUES ('pre');");
+        assert_eq!(parsed.up_sql, "INSERT INTO log VALUES ('up');");
+        assert_eq!(parsed.post_sql, "INSERT INTO log VALUES ('post');");
+        assert_eq!(
+            parsed.post_down_sql,
+            "INSERT INTO log VALUES ('post down');"
+        );
+        assert_eq!(
+            parsed.down_sql.as_deref(),
+            Some("INSERT INTO log VALUES ('down');")
+        );
+        assert_eq!(parsed.pre_down_sql, "INSERT INTO log VALUES ('pre down');");
     }
 
     #[test]
@@ -1126,6 +1749,177 @@ mod tests {
             graph.single_head().unwrap().as_deref(),
             Some("20260514_084500")
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_graph_plans_dag_upgrade_through_merge_revision() {
+        let dir = tmpdir("dag-upgrade");
+        fs::write(
+            dir.join("20260513_193000_initial.sql"),
+            migration("20260513_193000", "", "initial"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_080000_branch_a.sql"),
+            migration("20260514_080000", "20260513_193000", "branch a"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_090000_branch_b.sql"),
+            migration("20260514_090000", "20260513_193000", "branch b"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_100000_merge.sql"),
+            "-- uvg revision: 20260514_100000\n-- parents: 20260514_080000, 20260514_090000\n-- description: merge branches\n\n-- UP\n-- empty\n\n-- DOWN\n-- empty\n",
+        )
+        .unwrap();
+
+        let graph = MigrationGraph::load(&dir).unwrap();
+        assert_eq!(
+            graph.single_head().unwrap().as_deref(),
+            Some("20260514_100000")
+        );
+        let from_base = graph
+            .plan_upgrade(None, Some("20260514_100000"))
+            .unwrap()
+            .into_iter()
+            .map(|migration| migration.revision.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            from_base,
+            vec![
+                "20260513_193000",
+                "20260514_080000",
+                "20260514_090000",
+                "20260514_100000"
+            ]
+        );
+
+        let from_branch = graph
+            .plan_upgrade(Some("20260514_080000"), Some("20260514_100000"))
+            .unwrap()
+            .into_iter()
+            .map(|migration| migration.revision.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(from_branch, vec!["20260514_090000", "20260514_100000"]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_graph_plans_linear_downgrade() {
+        let dir = tmpdir("linear-downgrade");
+        fs::write(
+            dir.join("20260513_193000_initial.sql"),
+            migration("20260513_193000", "", "initial"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_084500_add_email.sql"),
+            migration("20260514_084500", "20260513_193000", "add email"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260515_090000_add_posts.sql"),
+            migration("20260515_090000", "20260514_084500", "add posts"),
+        )
+        .unwrap();
+
+        let graph = MigrationGraph::load(&dir).unwrap();
+        let one_step = graph
+            .plan_downgrade(Some("20260515_090000"), None)
+            .unwrap()
+            .into_iter()
+            .map(|migration| migration.revision.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(one_step, vec!["20260515_090000"]);
+
+        let to_initial = graph
+            .plan_downgrade(Some("20260515_090000"), Some("20260513_193000"))
+            .unwrap()
+            .into_iter()
+            .map(|migration| migration.revision.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(to_initial, vec!["20260515_090000", "20260514_084500"]);
+
+        let to_base = graph
+            .plan_downgrade(Some("20260515_090000"), Some("base"))
+            .unwrap()
+            .into_iter()
+            .map(|migration| migration.revision.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            to_base,
+            vec!["20260515_090000", "20260514_084500", "20260513_193000"]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_graph_rejects_downgrade_across_unrelated_branch() {
+        let dir = tmpdir("downgrade-unrelated");
+        fs::write(
+            dir.join("20260513_193000_initial.sql"),
+            migration("20260513_193000", "", "initial"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_080000_branch_a.sql"),
+            migration("20260514_080000", "20260513_193000", "branch a"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_090000_branch_b.sql"),
+            migration("20260514_090000", "20260513_193000", "branch b"),
+        )
+        .unwrap();
+
+        let graph = MigrationGraph::load(&dir).unwrap();
+        let err = graph
+            .plan_downgrade(Some("20260514_080000"), Some("20260514_090000"))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot downgrade across unrelated branches"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_graph_rejects_downgrade_through_merge_revision() {
+        let dir = tmpdir("downgrade-merge");
+        fs::write(
+            dir.join("20260513_193000_initial.sql"),
+            migration("20260513_193000", "", "initial"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_080000_branch_a.sql"),
+            migration("20260514_080000", "20260513_193000", "branch a"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_090000_branch_b.sql"),
+            migration("20260514_090000", "20260513_193000", "branch b"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_100000_merge.sql"),
+            "-- uvg revision: 20260514_100000\n-- parents: 20260514_080000, 20260514_090000\n-- description: merge branches\n\n-- UP\n-- empty\n\n-- DOWN\n-- empty\n",
+        )
+        .unwrap();
+
+        let graph = MigrationGraph::load(&dir).unwrap();
+        let err = graph
+            .plan_downgrade(Some("20260514_100000"), None)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot downgrade through merge revision"));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1182,6 +1976,7 @@ mod tests {
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("-- uvg revision: 20260513_193000"));
         assert!(body.contains("-- UP\nCREATE TABLE users"));
+        assert!(body.contains("-- DOWN\nDROP TABLE IF EXISTS users;"));
 
         let graph = MigrationGraph::load(&dir).unwrap();
         write_meta_file(&dir, &graph).unwrap();
@@ -1189,6 +1984,87 @@ mod tests {
         assert!(meta.contains("head: '20260513_193000'"));
         assert!(meta.contains("description: 'initial schema'"));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_write_merge_revision_file_and_meta() {
+        let dir = tmpdir("write-merge");
+        fs::write(
+            dir.join("20260514_080000_branch_a.sql"),
+            migration("20260514_080000", "", "branch a"),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("20260514_090000_branch_b.sql"),
+            migration("20260514_090000", "", "branch b"),
+        )
+        .unwrap();
+        let path = write_merge_revision_file(
+            &dir,
+            "20260514_100000",
+            &["20260514_080000".to_string(), "20260514_090000".to_string()],
+            "merge branches",
+        )
+        .unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("-- parents: 20260514_080000, 20260514_090000"));
+        assert!(body.contains("-- UP\n-- Empty merge revision"));
+        assert!(body.contains("-- DOWN\n-- Merge downgrade is not automatic"));
+
+        let graph = MigrationGraph::load(&dir).unwrap();
+        write_meta_file(&dir, &graph).unwrap();
+        let meta = fs::read_to_string(dir.join("meta.yaml")).unwrap();
+        assert!(meta.contains("head: '20260514_100000'"));
+        assert!(meta.contains("parents: ['20260514_080000', '20260514_090000']"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_render_down_sql_reverses_known_changes_and_marks_irreversible() {
+        let changes = vec![
+            Change {
+                table_schema: "".into(),
+                table_name: Some("users".into()),
+                sql: "CREATE TABLE \"users\" (id INTEGER);".into(),
+            },
+            Change {
+                table_schema: "".into(),
+                table_name: Some("users".into()),
+                sql: "ALTER TABLE \"users\" ADD COLUMN \"email\" TEXT;".into(),
+            },
+            Change {
+                table_schema: "".into(),
+                table_name: Some("legacy".into()),
+                sql: "DROP TABLE IF EXISTS \"legacy\";".into(),
+            },
+        ];
+
+        let down = render_down_sql(&changes, Dialect::Postgres);
+        assert!(
+            down.find("-- IRREVERSIBLE").unwrap()
+                < down
+                    .find("ALTER TABLE \"users\" DROP COLUMN \"email\";")
+                    .unwrap()
+        );
+        assert!(down.contains("DROP TABLE IF EXISTS \"users\";"));
+    }
+
+    #[test]
+    fn test_reverse_change_sql_does_not_treat_add_constraint_as_add_column() {
+        let down = reverse_change_sql(
+            "ALTER TABLE users ADD CONSTRAINT pk_users PRIMARY KEY (id);",
+            Dialect::Postgres,
+        );
+        assert!(down.contains("-- IRREVERSIBLE"));
+        assert!(!down.contains("DROP COLUMN CONSTRAINT"));
+    }
+
+    #[test]
+    fn test_first_sql_token_handles_escaped_quoted_identifiers() {
+        assert_eq!(first_sql_token("\"co\"\"l\" TEXT"), Some("\"co\"\"l\""));
+        assert_eq!(first_sql_token("`co``l` TEXT"), Some("`co``l`"));
+        assert_eq!(first_sql_token("[co]]l] TEXT"), Some("[co]]l]"));
     }
 
     #[test]
@@ -1235,13 +2111,11 @@ mod tests {
         let db_path = dir.join("target.db");
         fs::File::create(&db_path).unwrap();
         let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
-        let migration = MigrationFile {
-            revision: "20260513_193000".into(),
-            parents: Vec::new(),
-            description: "initial".into(),
-            path: dir.join("20260513_193000_initial.sql"),
-            up_sql: "CREATE TABLE users(id integer primary key);".into(),
-        };
+        let migration = migration_file(
+            "20260513_193000",
+            "CREATE TABLE users(id integer primary key);",
+            Some("DROP TABLE users;"),
+        );
 
         stamp_revision(&config, &migration).await.unwrap();
         assert_eq!(
@@ -1283,13 +2157,11 @@ mod tests {
         let db_path = dir.join("target.db");
         fs::File::create(&db_path).unwrap();
         let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
-        let migration = MigrationFile {
-            revision: "20260513_193000".into(),
-            parents: Vec::new(),
-            description: "initial".into(),
-            path: dir.join("20260513_193000_initial.sql"),
-            up_sql: "CREATE TABLE users(id integer primary key);".into(),
-        };
+        let migration = migration_file(
+            "20260513_193000",
+            "CREATE TABLE users(id integer primary key);",
+            Some("DROP TABLE users;"),
+        );
 
         apply_migration(&config, &migration).await.unwrap();
 
@@ -1305,6 +2177,167 @@ mod tests {
                 .unwrap();
         pool.close().await;
         assert_eq!(count, 1);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_apply_migration_runs_pre_up_post_in_order() {
+        let dir = tmpdir("sqlite-hooks-up");
+        let db_path = dir.join("target.db");
+        fs::File::create(&db_path).unwrap();
+        let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
+        let mut migration = migration_file(
+            "20260513_193000",
+            "INSERT INTO events VALUES ('up');",
+            Some(""),
+        );
+        migration.pre_sql =
+            "CREATE TABLE events(step text); INSERT INTO events VALUES ('pre');".into();
+        migration.post_sql = "INSERT INTO events VALUES ('post');".into();
+
+        apply_migration(&config, &migration).await.unwrap();
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        let rows: Vec<String> = sqlx::query_scalar("SELECT step FROM events ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        assert_eq!(rows, vec!["pre", "up", "post"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_apply_migration_reports_failed_section() {
+        let dir = tmpdir("sqlite-hooks-fail");
+        let db_path = dir.join("target.db");
+        fs::File::create(&db_path).unwrap();
+        let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
+        let mut migration = migration_file(
+            "20260513_193000",
+            "CREATE TABLE events(step text);",
+            Some(""),
+        );
+        migration.post_sql = "INSERT INTO missing_table VALUES ('post');".into();
+
+        let err = apply_migration(&config, &migration).await.unwrap_err();
+        assert!(err.to_string().contains("POST section"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_apply_down_migration_runs_post_down_down_pre_down_in_order() {
+        let dir = tmpdir("sqlite-hooks-down");
+        let db_path = dir.join("target.db");
+        fs::File::create(&db_path).unwrap();
+        let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
+        db::execute_ddl(&config, "CREATE TABLE events(step text);", 3, |_, _, _| {})
+            .await
+            .unwrap();
+        let mut migration = migration_file(
+            "20260513_193000",
+            "",
+            Some("INSERT INTO events VALUES ('down');"),
+        );
+        migration.post_down_sql = "INSERT INTO events VALUES ('post down');".into();
+        migration.pre_down_sql = "INSERT INTO events VALUES ('pre down');".into();
+
+        apply_down_migration(&config, &migration).await.unwrap();
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        let rows: Vec<String> = sqlx::query_scalar("SELECT step FROM events ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        assert_eq!(rows, vec!["post down", "down", "pre down"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_downgrade_drops_table_and_clears_base_revision() {
+        let dir = tmpdir("sqlite-downgrade");
+        let db_path = dir.join("target.db");
+        fs::File::create(&db_path).unwrap();
+        let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
+        let migration = migration_file(
+            "20260513_193000",
+            "CREATE TABLE users(id integer primary key);",
+            Some("DROP TABLE users;"),
+        );
+
+        ensure_version_table(&config).await.unwrap();
+        apply_migration(&config, &migration).await.unwrap();
+        record_revision(&config, &migration.revision, &migration.description)
+            .await
+            .unwrap();
+        apply_down_migration(&config, &migration).await.unwrap();
+        clear_revision(&config).await.unwrap();
+
+        assert_eq!(current_revision(&config).await.unwrap(), None);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        let users_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'users'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        assert_eq!(users_count, 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_irreversible_down_refuses_to_change_revision() {
+        let dir = tmpdir("sqlite-irreversible-down");
+        let db_path = dir.join("target.db");
+        fs::File::create(&db_path).unwrap();
+        let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
+        db::execute_ddl(&config, "CREATE TABLE events(step text);", 3, |_, _, _| {})
+            .await
+            .unwrap();
+        let mut migration = migration_file(
+            "20260513_193000",
+            "CREATE TABLE users(id integer primary key);",
+            Some("-- IRREVERSIBLE: this migration drops data."),
+        );
+        migration.post_down_sql = "INSERT INTO events VALUES ('post down');".into();
+
+        ensure_version_table(&config).await.unwrap();
+        record_revision(&config, &migration.revision, &migration.description)
+            .await
+            .unwrap();
+        let err = apply_down_migration(&config, &migration).await.unwrap_err();
+        assert!(err.to_string().contains("irreversible DOWN section"));
+        assert_eq!(
+            current_revision(&config).await.unwrap().as_deref(),
+            Some("20260513_193000")
+        );
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        assert_eq!(event_count, 0, "POST DOWN must not run after guard fails");
 
         fs::remove_dir_all(&dir).ok();
     }

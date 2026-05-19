@@ -114,7 +114,9 @@ fn baseline_sql() -> String {
          -- parent: \n\
          -- description: {BASELINE_DESCRIPTION}\n\n\
          -- UP\n\
-         -- Baseline revision. No SQL is executed.\n"
+         -- Baseline revision. No SQL is executed.\n\n\
+         -- DOWN\n\
+         -- Baseline downgrade. No SQL is executed.\n"
     )
 }
 

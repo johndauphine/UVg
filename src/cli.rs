@@ -124,6 +124,12 @@ pub enum Command {
     /// Apply pending versioned migrations to a target database
     Upgrade(UpgradeCommand),
 
+    /// Roll back versioned migrations on a target database
+    Downgrade(DowngradeCommand),
+
+    /// Create a merge revision from multiple migration heads
+    Merge(MergeCommand),
+
     /// Mark a target database at a revision without running migrations
     Stamp(StampCommand),
 
@@ -169,6 +175,30 @@ pub struct UpgradeCommand {
 
     /// Revision to upgrade to; defaults to head
     pub revision: Option<String>,
+
+    /// Directory containing versioned migration files
+    #[arg(long, default_value = "./migrations")]
+    pub migrations_dir: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DowngradeCommand {
+    /// Target database URL to roll back
+    pub target_url: String,
+
+    /// Revision to downgrade to; defaults to one revision back
+    pub revision: Option<String>,
+
+    /// Directory containing versioned migration files
+    #[arg(long, default_value = "./migrations")]
+    pub migrations_dir: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MergeCommand {
+    /// Human-readable merge revision description
+    #[arg(long, short = 'm')]
+    pub message: String,
 
     /// Directory containing versioned migration files
     #[arg(long, default_value = "./migrations")]
