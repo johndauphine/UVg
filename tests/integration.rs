@@ -257,6 +257,181 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Read every table name from a SQLite DB. Used to verify that an
+    /// `--apply` run actually created the source's tables on the target.
+    async fn list_tables(db_path: &Path) -> Vec<String> {
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("sqlite connect");
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list tables");
+        pool.close().await;
+        rows.into_iter().map(|(n,)| n).collect()
+    }
+
+    #[tokio::test]
+    async fn test_apply_inline_creates_target_tables() {
+        // --apply (no --out-dir) should generate the diff and execute it
+        // against the target in one shot.
+        let dir = tmpdir("apply-inline");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT NOT NULL);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        // Bring the target file into existence with an empty schema.
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        // Sanity: target starts empty.
+        assert!(list_tables(&target).await.is_empty(), "target should start empty");
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(
+            out.status.success(),
+            "apply run failed: stderr={}, stdout={}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout),
+        );
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("applied") && stderr.contains("statement"),
+            "expected applied-summary on stderr, got: {stderr}"
+        );
+
+        // Target should now match the source's tables.
+        let tables = list_tables(&target).await;
+        assert_eq!(tables, vec!["posts".to_string(), "users".to_string()]);
+
+        // Second run is a no-op: zero applied statements, "no schema changes" on stderr.
+        let out2 = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(
+            out2.status.success(),
+            "noop apply failed: {}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        let stderr2 = String::from_utf8_lossy(&out2.stderr);
+        assert!(
+            stderr2.contains("no schema changes"),
+            "expected no-schema-changes message, got: {stderr2}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_outdir_writes_and_applies() {
+        // --apply with --out-dir should write per-table files AND execute
+        // them in manifest order. The FK from posts -> users means the
+        // apply only succeeds if users is created before posts.
+        let dir = tmpdir("apply-outdir");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        let migrations = dir.join("migrations");
+
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT NOT NULL);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+        let mig_str = migrations.display().to_string();
+
+        let out = run_uvg(&[
+            "--generator", "ddl",
+            "--apply",
+            "--out-dir", &mig_str,
+            "--name", "initial",
+            &src_url, &tgt_url,
+        ]);
+        assert!(
+            out.status.success(),
+            "apply+outdir run failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("wrote"), "expected write summary, got: {stderr}");
+        assert!(
+            stderr.contains("applied") && stderr.contains("file"),
+            "expected apply summary, got: {stderr}"
+        );
+
+        // Files were written under per-table layout.
+        assert!(migrations.join("users").is_dir(), "users/ missing");
+        assert!(migrations.join("posts").is_dir(), "posts/ missing");
+
+        // Target now matches the source.
+        assert_eq!(
+            list_tables(&target).await,
+            vec!["posts".to_string(), "users".to_string()]
+        );
+
+        // Re-run is a no-op: nothing applied, nothing written.
+        let before = snapshot_dir(&migrations);
+        let out2 = run_uvg(&[
+            "--generator", "ddl",
+            "--apply",
+            "--out-dir", &mig_str,
+            "--name", "should-not-appear",
+            &src_url, &tgt_url,
+        ]);
+        assert!(
+            out2.status.success(),
+            "noop apply+outdir failed: {}",
+            String::from_utf8_lossy(&out2.stderr),
+        );
+        let stderr2 = String::from_utf8_lossy(&out2.stderr);
+        assert!(
+            stderr2.contains("no schema changes"),
+            "expected no-op message, got: {stderr2}"
+        );
+        let after = snapshot_dir(&migrations);
+        assert_eq!(before, after, "no-op run must not touch the migrations dir");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_requires_target_url() {
+        // --apply without a target URL must exit non-zero with a helpful message.
+        let dir = tmpdir("apply-no-target");
+        let source = dir.join("source.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        let src_url = format!("sqlite:///{}", source.display());
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url]);
+        assert!(!out.status.success(), "expected non-zero exit");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("target database URL"),
+            "expected helpful error, got: {stderr}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn test_out_dir_requires_target_url() {
         let dir = tmpdir("outdir-no-target");
