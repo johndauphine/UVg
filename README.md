@@ -89,12 +89,18 @@ The target dialect is inferred from the target URL scheme. Same-dialect migratio
 For Alembic-style workflows, UVg can write timestamped revision files and track the target database's current revision in a `uvg_version` table.
 
 ```bash
+# Scaffold migrations/ and uvg.toml
+uvg init
+
 # Write migrations/<revision>_add-users-email.sql
 uvg revision postgresql://source/db postgresql://target/db \
   --message "add users.email"
 
 # Apply pending revisions to the target and update uvg_version
 uvg upgrade postgresql://target/db
+
+# Adopt an already-current target without running migration SQL
+uvg stamp postgresql://target/db 20260519_141500 --yes
 
 # Inspect the target's current revision
 uvg current postgresql://target/db
@@ -115,7 +121,7 @@ Revision files use a simple SQL format:
 ALTER TABLE "users" ADD COLUMN "email" VARCHAR(255);
 ```
 
-The first implementation supports a single linear revision chain. Branched heads, merge revisions, down migrations, stamping, and project scaffolding are tracked as separate follow-up issues.
+The first implementation supports a single linear revision chain. Branched heads, merge revisions, and down migrations are tracked as separate follow-up issues.
 
 ### Per-table migration layout (`--out-dir`)
 

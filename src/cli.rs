@@ -115,17 +115,34 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Scaffold a migrations directory and project config
+    Init(InitCommand),
+
     /// Generate a versioned migration file from a source/target diff
     Revision(RevisionCommand),
 
     /// Apply pending versioned migrations to a target database
     Upgrade(UpgradeCommand),
 
+    /// Mark a target database at a revision without running migrations
+    Stamp(StampCommand),
+
     /// Print the target database's current uvg revision
     Current(CurrentCommand),
 
     /// Show the local migration graph
     History(HistoryCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct InitCommand {
+    /// Directory for versioned migration files
+    #[arg(long, default_value = "./migrations")]
+    pub migrations_dir: PathBuf,
+
+    /// Project-local config file to create
+    #[arg(long, default_value = "./uvg.toml")]
+    pub config: PathBuf,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -156,6 +173,23 @@ pub struct UpgradeCommand {
     /// Directory containing versioned migration files
     #[arg(long, default_value = "./migrations")]
     pub migrations_dir: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StampCommand {
+    /// Target database URL to stamp
+    pub target_url: String,
+
+    /// Existing migration revision to record
+    pub revision: String,
+
+    /// Directory containing versioned migration files
+    #[arg(long, default_value = "./migrations")]
+    pub migrations_dir: PathBuf,
+
+    /// Skip confirmation prompt
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -5,6 +5,7 @@ mod db;
 mod ddl_typemap;
 mod dialect;
 mod error;
+mod init;
 mod introspect;
 mod migrations;
 mod naming;

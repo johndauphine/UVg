@@ -6,13 +6,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 
 use crate::cli::{
-    Cli, Command, ConnectionConfig, DdlOptions, HistoryCommand, RevisionCommand, UpgradeCommand,
+    Cli, Command, ConnectionConfig, DdlOptions, HistoryCommand, RevisionCommand, StampCommand,
+    UpgradeCommand,
 };
 use crate::codegen::ddl_diff::compute_changes;
 use crate::db;
@@ -23,8 +25,10 @@ const VERSION_TABLE: &str = "uvg_version";
 
 pub(crate) async fn run(cli: &Cli, command: &Command) -> Result<()> {
     match command {
+        Command::Init(args) => crate::init::run(args),
         Command::Revision(args) => run_revision(cli, args).await,
         Command::Upgrade(args) => run_upgrade(cli, args).await,
+        Command::Stamp(args) => run_stamp(cli, args).await,
         Command::Current(args) => {
             let config = cli.parse_connection_url(&args.target_url)?;
             match current_revision(&config).await? {
@@ -125,6 +129,25 @@ async fn run_upgrade(cli: &Cli, args: &UpgradeCommand) -> Result<()> {
         eprintln!("uvg: applied {}", migration.revision);
     }
 
+    Ok(())
+}
+
+async fn run_stamp(cli: &Cli, args: &StampCommand) -> Result<()> {
+    let graph = MigrationGraph::load(&args.migrations_dir)?;
+    let migration = graph.require_revision(&args.revision)?;
+    let config = cli.parse_connection_url(&args.target_url)?;
+
+    if !args.yes && !confirm_stamp(&args.target_url, &args.revision)? {
+        eprintln!("uvg: stamp cancelled");
+        return Ok(());
+    }
+
+    stamp_revision(&config, migration).await?;
+    eprintln!(
+        "uvg: stamped {} at revision {}",
+        redact_url(&args.target_url),
+        migration.revision
+    );
     Ok(())
 }
 
@@ -285,6 +308,16 @@ impl MigrationGraph {
             }
             None => self.single_head(),
         }
+    }
+
+    fn require_revision(&self, revision: &str) -> Result<&MigrationFile> {
+        self.migrations.get(revision).ok_or_else(|| {
+            anyhow!(
+                "unknown migration revision `{}`. Valid revisions: {}",
+                revision,
+                self.valid_revisions()
+            )
+        })
     }
 
     fn plan_upgrade<'a>(
@@ -654,6 +687,38 @@ async fn apply_migration(config: &ConnectionConfig, migration: &MigrationFile) -
         ));
     }
     Ok(())
+}
+
+async fn stamp_revision(config: &ConnectionConfig, migration: &MigrationFile) -> Result<()> {
+    ensure_version_table(config).await?;
+    record_revision(config, &migration.revision, &migration.description).await
+}
+
+fn confirm_stamp(target_url: &str, revision: &str) -> Result<bool> {
+    eprintln!(
+        "About to stamp {} at revision {} without running any migration SQL.",
+        redact_url(target_url),
+        revision
+    );
+    eprintln!("The schema must already match this revision.");
+    eprint!("Continue? [y/N] ");
+    io::stderr().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn redact_url(raw: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return raw.to_string();
+    }
+    let _ = parsed.set_username("***");
+    let _ = parsed.set_password(None);
+    parsed.into()
 }
 
 async fn ensure_version_table(config: &ConnectionConfig) -> Result<()> {
@@ -1082,6 +1147,21 @@ mod tests {
     }
 
     #[test]
+    fn test_require_revision_rejects_unknown_stamp_target() {
+        let dir = tmpdir("unknown-stamp");
+        fs::write(
+            dir.join("20260513_193000_initial.sql"),
+            migration("20260513_193000", "", "initial"),
+        )
+        .unwrap();
+        let graph = MigrationGraph::load(&dir).unwrap();
+        let err = graph.require_revision("missing").unwrap_err();
+        assert!(err.to_string().contains("unknown migration revision"));
+        assert!(err.to_string().contains("20260513_193000"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_write_revision_file_and_meta() {
         let dir = tmpdir("write");
         let changes = vec![Change {
@@ -1111,6 +1191,24 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn test_graph_loads_dot_prefixed_baseline_file() {
+        let dir = tmpdir("dot-baseline");
+        fs::write(
+            dir.join(".uvg-revision-00000000_000000_initial.sql"),
+            migration("00000000_000000", "", "initial baseline"),
+        )
+        .unwrap();
+
+        let graph = MigrationGraph::load(&dir).unwrap();
+        assert_eq!(
+            graph.single_head().unwrap().as_deref(),
+            Some("00000000_000000")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn test_sqlite_current_and_record_revision() {
         let dir = tmpdir("sqlite-version");
@@ -1127,6 +1225,54 @@ mod tests {
             current_revision(&config).await.unwrap().as_deref(),
             Some("20260513_193000")
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_stamp_revision_creates_version_table_without_running_up_sql() {
+        let dir = tmpdir("sqlite-stamp");
+        let db_path = dir.join("target.db");
+        fs::File::create(&db_path).unwrap();
+        let config = ConnectionConfig::Sqlite(format!("sqlite://{}", db_path.display()));
+        let migration = MigrationFile {
+            revision: "20260513_193000".into(),
+            parents: Vec::new(),
+            description: "initial".into(),
+            path: dir.join("20260513_193000_initial.sql"),
+            up_sql: "CREATE TABLE users(id integer primary key);".into(),
+        };
+
+        stamp_revision(&config, &migration).await.unwrap();
+        assert_eq!(
+            current_revision(&config).await.unwrap().as_deref(),
+            Some("20260513_193000")
+        );
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}", db_path.display()))
+            .await
+            .unwrap();
+        let users_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'users'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let version_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'uvg_version'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let stamped_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM uvg_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        assert_eq!(users_count, 0, "stamp must not execute migration SQL");
+        assert_eq!(version_count, 1, "stamp should create uvg_version");
+        assert_eq!(stamped_rows, 1, "stamp should write one version row");
 
         fs::remove_dir_all(&dir).ok();
     }
