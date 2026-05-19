@@ -590,6 +590,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[tokio::test]
+    async fn test_apply_parse_check_skipped_note_on_sqlite() {
+        // SQLite has no parse-only mode, so `run_parse_check` emits a
+        // one-line skip note on stderr (rather than aborting the
+        // apply). Default --apply enables parse-check, so the note
+        // should appear on a normal apply run.
+        let dir = tmpdir("parse-check-sqlite-skip");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("parse-check skipped"),
+            "expected parse-check-skipped note on sqlite default apply: {stderr}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_no_parse_check_suppresses_skip_note() {
+        // --no-parse-check must avoid even the skip note, because the
+        // user explicitly turned the phase off. Verifies the flag is
+        // wired through end-to-end.
+        let dir = tmpdir("parse-check-sqlite-suppressed");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&[
+            "--generator", "ddl", "--apply", "--no-parse-check",
+            &src_url, &tgt_url,
+        ]);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("parse-check skipped"),
+            "skip note must not appear with --no-parse-check: {stderr}"
+        );
+        // Sanity: the apply itself still happened.
+        assert!(stderr.contains("uvg: applied"), "apply summary missing: {stderr}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // No E2E for the failed-statement progress path: forcing uvg to
     // emit a statement that fails-on-apply requires either custom
     // injection beyond the public CLI's surface (the diff engine
