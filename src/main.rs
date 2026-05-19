@@ -1,3 +1,4 @@
+mod apply_progress;
 mod cli;
 mod codegen;
 mod db;
@@ -217,8 +218,14 @@ async fn main() -> Result<()> {
                                 // early --apply check enforces it too.
                                 let target_url = cli.target_url.as_deref().unwrap();
                                 let target_config = cli.parse_target_connection(target_url)?;
-                                apply_manifest(&target_config, &manifest, out_dir, target_url)
-                                    .await?;
+                                apply_manifest(
+                                    &target_config,
+                                    &manifest,
+                                    out_dir,
+                                    target_url,
+                                    cli.progress.resolved(),
+                                )
+                                .await?;
                             }
                         }
                     }
@@ -237,7 +244,13 @@ async fn main() -> Result<()> {
                         // guard at the top of this arm.
                         let target_url = cli.target_url.as_deref().unwrap();
                         let target_config = cli.parse_target_connection(target_url)?;
-                        apply_inline(&target_config, &content, target_url).await?;
+                        apply_inline(
+                            &target_config,
+                            &content,
+                            target_url,
+                            cli.progress.resolved(),
+                        )
+                        .await?;
                     }
                 }
                 DdlOutput::Split(files) => {
@@ -311,13 +324,25 @@ fn redact_target_url(raw: &str) -> String {
 /// Apply a freshly-rendered diff (single SQL blob) against `config`.
 /// Empty diffs report "no schema changes" and succeed; first failed
 /// statement bubbles up as a non-zero exit. `target_url` is redacted
-/// before being printed.
+/// before being printed. When `progress_enabled` is true, one
+/// `[i/total] <preview>  <ms>ms` line is emitted per statement and a
+/// class-breakdown summary follows.
 async fn apply_inline(
     config: &ConnectionConfig,
     content: &str,
     target_url: &str,
+    progress_enabled: bool,
 ) -> Result<()> {
-    let results = db::execute_ddl(config, content).await?;
+    let mut stats = apply_progress::ApplyStats::new();
+    let results = {
+        let observer = |r: &db::StmtResult, i: usize, total: usize| {
+            if progress_enabled {
+                apply_progress::print_progress(r, i, total);
+            }
+            stats.record(r);
+        };
+        db::execute_ddl(config, content, observer).await?
+    };
     if results.is_empty() {
         eprintln!("uvg: no schema changes");
         return Ok(());
@@ -335,24 +360,39 @@ async fn apply_inline(
         ));
     }
     eprintln!("uvg: applied {} statement(s) to {}", applied, label);
+    if progress_enabled {
+        eprintln!("{}", stats.render_summary());
+    }
     Ok(())
 }
 
 /// Apply a manifest's per-table files in `apply_order` (schema-scoped
 /// first, then tables in topo order). Each file is parsed and executed
 /// independently so the error message can pinpoint which file failed.
-/// `target_url` is redacted before being printed.
+/// `target_url` is redacted before being printed. `progress_enabled`
+/// behaves the same as `apply_inline`: per-statement lines + a single
+/// final class-breakdown summary across ALL files (not per file).
 async fn apply_manifest(
     config: &ConnectionConfig,
     manifest: &Manifest,
     out_dir: &std::path::Path,
     target_url: &str,
+    progress_enabled: bool,
 ) -> Result<()> {
     let paths = apply_order(manifest, out_dir);
     let mut total_applied = 0usize;
+    let mut stats = apply_progress::ApplyStats::new();
     for path in &paths {
         let content = fs::read_to_string(path)?;
-        let results = db::execute_ddl(config, &content).await?;
+        let results = {
+            let observer = |r: &db::StmtResult, i: usize, total: usize| {
+                if progress_enabled {
+                    apply_progress::print_progress(r, i, total);
+                }
+                stats.record(r);
+            };
+            db::execute_ddl(config, &content, observer).await?
+        };
         let applied_here = results.iter().take_while(|r| r.error.is_none()).count();
         total_applied += applied_here;
         if let Some(failed) = results.iter().find(|r| r.error.is_some()) {
@@ -372,6 +412,9 @@ async fn apply_manifest(
         paths.len(),
         redact_target_url(target_url),
     );
+    if progress_enabled {
+        eprintln!("{}", stats.render_summary());
+    }
     Ok(())
 }
 

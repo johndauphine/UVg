@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 
 use crate::cli::{ConnectionConfig, GeneratorOptions};
@@ -71,6 +73,9 @@ pub(crate) async fn introspect_with_config(
 pub(crate) struct StmtResult {
     pub sql: String,
     pub error: Option<String>,
+    /// Wall-clock time the statement took to execute on the target.
+    /// Used by the per-statement progress reporter (#45).
+    pub duration: Duration,
 }
 
 /// Split DDL output into individual statements using a SQL-aware splitter.
@@ -207,8 +212,21 @@ fn strip_leading_comments(s: &str) -> Option<String> {
 
 /// Execute DDL statements one-by-one against the target database.
 /// Stops on first error.
-pub(crate) async fn execute_ddl(config: &ConnectionConfig, ddl: &str) -> Result<Vec<StmtResult>> {
+///
+/// `on_statement` is invoked after every executed statement (success or
+/// failure) with the `StmtResult`, its 1-based index, and the total
+/// statement count. The per-statement progress reporter uses it; the
+/// TUI passes a no-op closure.
+pub(crate) async fn execute_ddl<F>(
+    config: &ConnectionConfig,
+    ddl: &str,
+    mut on_statement: F,
+) -> Result<Vec<StmtResult>>
+where
+    F: FnMut(&StmtResult, usize, usize),
+{
     let statements = split_statements(ddl);
+    let total = statements.len();
     let mut results = Vec::new();
 
     match config {
@@ -217,14 +235,17 @@ pub(crate) async fn execute_ddl(config: &ConnectionConfig, ddl: &str) -> Result<
                 .max_connections(1)
                 .connect(url)
                 .await?;
-            for stmt in &statements {
+            for (i, stmt) in statements.iter().enumerate() {
+                let start = Instant::now();
                 let r = sqlx::query(stmt).execute(&pool).await;
-                let error = r.err().map(|e| e.to_string());
-                let failed = error.is_some();
-                results.push(StmtResult {
+                let result = StmtResult {
                     sql: stmt.to_string(),
-                    error,
-                });
+                    error: r.err().map(|e| e.to_string()),
+                    duration: start.elapsed(),
+                };
+                on_statement(&result, i + 1, total);
+                let failed = result.error.is_some();
+                results.push(result);
                 if failed {
                     break;
                 }
@@ -236,14 +257,17 @@ pub(crate) async fn execute_ddl(config: &ConnectionConfig, ddl: &str) -> Result<
                 .max_connections(1)
                 .connect(url)
                 .await?;
-            for stmt in &statements {
+            for (i, stmt) in statements.iter().enumerate() {
+                let start = Instant::now();
                 let r = sqlx::query(stmt).execute(&pool).await;
-                let error = r.err().map(|e| e.to_string());
-                let failed = error.is_some();
-                results.push(StmtResult {
+                let result = StmtResult {
                     sql: stmt.to_string(),
-                    error,
-                });
+                    error: r.err().map(|e| e.to_string()),
+                    duration: start.elapsed(),
+                };
+                on_statement(&result, i + 1, total);
+                let failed = result.error.is_some();
+                results.push(result);
                 if failed {
                     break;
                 }
@@ -255,14 +279,17 @@ pub(crate) async fn execute_ddl(config: &ConnectionConfig, ddl: &str) -> Result<
                 .max_connections(1)
                 .connect(url)
                 .await?;
-            for stmt in &statements {
+            for (i, stmt) in statements.iter().enumerate() {
+                let start = Instant::now();
                 let r = sqlx::query(stmt).execute(&pool).await;
-                let error = r.err().map(|e| e.to_string());
-                let failed = error.is_some();
-                results.push(StmtResult {
+                let result = StmtResult {
                     sql: stmt.to_string(),
-                    error,
-                });
+                    error: r.err().map(|e| e.to_string()),
+                    duration: start.elapsed(),
+                };
+                on_statement(&result, i + 1, total);
+                let failed = result.error.is_some();
+                results.push(result);
                 if failed {
                     break;
                 }
@@ -280,14 +307,17 @@ pub(crate) async fn execute_ddl(config: &ConnectionConfig, ddl: &str) -> Result<
             let mut client =
                 introspect::mssql::connect(host, *port, database, user, password, *trust_cert)
                     .await?;
-            for stmt in &statements {
+            for (i, stmt) in statements.iter().enumerate() {
+                let start = Instant::now();
                 let r = client.execute(stmt.to_string(), &[]).await;
-                let error = r.err().map(|e| e.to_string());
-                let failed = error.is_some();
-                results.push(StmtResult {
+                let result = StmtResult {
                     sql: stmt.to_string(),
-                    error,
-                });
+                    error: r.err().map(|e| e.to_string()),
+                    duration: start.elapsed(),
+                };
+                on_statement(&result, i + 1, total);
+                let failed = result.error.is_some();
+                results.push(result);
                 if failed {
                     break;
                 }
