@@ -38,3 +38,6 @@ glob = "0.3"
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
 indoc = "2"
+# `test-util` enables tokio::time::pause / start_paused, used by the
+# run_with_retry tests so they don't burn real wall-clock seconds.
+tokio = { version = "1", features = ["test-util"] }

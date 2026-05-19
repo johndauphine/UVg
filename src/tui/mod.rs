@@ -848,7 +848,9 @@ async fn apply_ddl(app: &mut App) -> Result<Vec<db::StmtResult>> {
     // TUI renders its own per-statement status from the returned
     // Vec<StmtResult>; the per-statement progress reporter is for the
     // headless --apply path only (see apply_progress::print_progress).
-    db::execute_ddl(&config, &sql, |_, _, _| {}).await
+    // TUI doesn't take a CLI flag for retries (it's an interactive
+    // path); use the same default the headless --apply does.
+    db::execute_ddl(&config, &sql, 3, |_, _, _| {}).await
 }
 
 fn make_cli(url: &str, trust_cert: bool) -> Cli {
@@ -860,6 +862,7 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
         split_tables: false,
         apply: false,
         progress: crate::apply_progress::ProgressMode::Auto,
+        apply_retries: 3,
         tables: None,
         exclude_tables: None,
         schemas: None,

@@ -224,6 +224,7 @@ async fn main() -> Result<()> {
                                     out_dir,
                                     target_url,
                                     cli.progress.resolved(),
+                                    cli.apply_retries,
                                 )
                                 .await?;
                             }
@@ -249,6 +250,7 @@ async fn main() -> Result<()> {
                             &content,
                             target_url,
                             cli.progress.resolved(),
+                            cli.apply_retries,
                         )
                         .await?;
                     }
@@ -332,6 +334,7 @@ async fn apply_inline(
     content: &str,
     target_url: &str,
     progress_enabled: bool,
+    max_retries: u8,
 ) -> Result<()> {
     let mut stats = apply_progress::ApplyStats::new();
     let results = {
@@ -341,7 +344,7 @@ async fn apply_inline(
             }
             stats.record(r);
         };
-        db::execute_ddl(config, content, observer).await?
+        db::execute_ddl(config, content, max_retries, observer).await?
     };
     if results.is_empty() {
         eprintln!("uvg: no schema changes");
@@ -378,6 +381,7 @@ async fn apply_manifest(
     out_dir: &std::path::Path,
     target_url: &str,
     progress_enabled: bool,
+    max_retries: u8,
 ) -> Result<()> {
     let paths = apply_order(manifest, out_dir);
     let mut total_applied = 0usize;
@@ -391,7 +395,7 @@ async fn apply_manifest(
                 }
                 stats.record(r);
             };
-            db::execute_ddl(config, &content, observer).await?
+            db::execute_ddl(config, &content, max_retries, observer).await?
         };
         let applied_here = results.iter().take_while(|r| r.error.is_none()).count();
         total_applied += applied_here;

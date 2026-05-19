@@ -40,6 +40,14 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = crate::apply_progress::ProgressMode::Auto)]
     pub progress: crate::apply_progress::ProgressMode,
 
+    /// Maximum retry attempts per statement on `--apply` for transient
+    /// errors (deadlock, lock-wait timeout, brief connection drops).
+    /// Logical errors (constraint, syntax, missing column) fail
+    /// immediately regardless. `0` disables retry; default `3`.
+    /// Backoff is 100ms / 500ms / 2s with jitter.
+    #[arg(long, default_value_t = 3)]
+    pub apply_retries: u8,
+
     /// Tables to process (comma-delimited). Each item is a glob pattern
     /// (`*`, `?`, `[abc]`); bare names with no metacharacters match
     /// exactly. Default: all tables.
@@ -249,6 +257,7 @@ impl Cli {
                 split_tables: false,
                 apply: false,
                 progress: crate::apply_progress::ProgressMode::Auto,
+                apply_retries: 3,
                 tables: None,
                 exclude_tables: None,
                 schemas: None,
@@ -289,6 +298,7 @@ impl Cli {
             split_tables: false,
             apply: false,
             progress: crate::apply_progress::ProgressMode::Auto,
+            apply_retries: 3,
             tables: None,
             exclude_tables: None,
             schemas: None,
@@ -435,6 +445,7 @@ mod tests {
             split_tables: false,
             apply: false,
             progress: crate::apply_progress::ProgressMode::Auto,
+            apply_retries: 3,
             tables: None,
             exclude_tables: None,
             schemas: None,
