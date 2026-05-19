@@ -25,7 +25,7 @@ use crate::codegen::declarative::DeclarativeGenerator;
 use crate::codegen::ddl_diff::compute_changes;
 use crate::codegen::tables::TablesGenerator;
 use crate::codegen::Generator;
-use crate::output::{write_split_changes, OutputContext};
+use crate::output::{apply_order, write_split_changes, Manifest, OutputContext};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -150,6 +150,14 @@ async fn main() -> Result<()> {
 
             let ddl_opts = cli.ddl_options(dialect)?;
 
+            // --apply needs a target to execute against. Fail fast before we
+            // do any work the user would have to throw away.
+            if ddl_opts.apply && cli.target_url.is_none() {
+                return Err(anyhow::anyhow!(
+                    "--apply requires a target database URL"
+                ));
+            }
+
             // If a target URL is provided, introspect it for diff
             let target_schema = if let Some(ref target_url) = cli.target_url {
                 let target_config = cli.parse_target_connection(target_url)?;
@@ -202,6 +210,15 @@ async fn main() -> Result<()> {
                                 out_dir.display(),
                                 run_id,
                             );
+                            if ddl_opts.apply {
+                                // target_url is guaranteed Some here: --out-dir
+                                // already errored above without one, and the
+                                // early --apply check enforces it too.
+                                let target_url = cli.target_url.as_deref().unwrap();
+                                let target_config = cli.parse_target_connection(target_url)?;
+                                apply_manifest(&target_config, &manifest, out_dir, target_url)
+                                    .await?;
+                            }
                         }
                     }
                     return Ok(());
@@ -214,6 +231,13 @@ async fn main() -> Result<()> {
             match ddl_output {
                 DdlOutput::Single(content) => {
                     write_output(&content, &cli.outfile)?;
+                    if ddl_opts.apply {
+                        // target_url is Some: enforced by the early --apply
+                        // guard at the top of this arm.
+                        let target_url = cli.target_url.as_deref().unwrap();
+                        let target_config = cli.parse_target_connection(target_url)?;
+                        apply_inline(&target_config, &content, target_url).await?;
+                    }
                 }
                 DdlOutput::Split(files) => {
                     match cli.outfile {
@@ -262,6 +286,73 @@ fn write_split_output(files: &[(String, String)], outfile: &Option<String>) -> a
             }
         }
     }
+    Ok(())
+}
+
+/// Apply a freshly-rendered diff (single SQL blob) against `config`.
+/// Empty diffs report "no schema changes" and succeed; first failed
+/// statement bubbles up as a non-zero exit.
+async fn apply_inline(
+    config: &ConnectionConfig,
+    content: &str,
+    target_label: &str,
+) -> Result<()> {
+    let results = db::execute_ddl(config, content).await?;
+    if results.is_empty() {
+        eprintln!("uvg: no schema changes");
+        return Ok(());
+    }
+    let applied = results.iter().take_while(|r| r.error.is_none()).count();
+    if let Some(failed) = results.iter().find(|r| r.error.is_some()) {
+        return Err(anyhow::anyhow!(
+            "uvg: apply failed on statement {}/{} against {}: {}\n--- SQL ---\n{}",
+            applied + 1,
+            results.len(),
+            target_label,
+            failed.error.as_deref().unwrap_or(""),
+            failed.sql,
+        ));
+    }
+    eprintln!(
+        "uvg: applied {} statement(s) to {}",
+        applied, target_label
+    );
+    Ok(())
+}
+
+/// Apply a manifest's per-table files in `apply_order` (schema-scoped
+/// first, then tables in topo order). Each file is parsed and executed
+/// independently so the error message can pinpoint which file failed.
+async fn apply_manifest(
+    config: &ConnectionConfig,
+    manifest: &Manifest,
+    out_dir: &std::path::Path,
+    target_label: &str,
+) -> Result<()> {
+    let paths = apply_order(manifest, out_dir);
+    let mut total_applied = 0usize;
+    for path in &paths {
+        let content = fs::read_to_string(path)?;
+        let results = db::execute_ddl(config, &content).await?;
+        let applied_here = results.iter().take_while(|r| r.error.is_none()).count();
+        total_applied += applied_here;
+        if let Some(failed) = results.iter().find(|r| r.error.is_some()) {
+            return Err(anyhow::anyhow!(
+                "uvg: apply failed in {} (statement {}/{}): {}\n--- SQL ---\n{}",
+                path.display(),
+                applied_here + 1,
+                results.len(),
+                failed.error.as_deref().unwrap_or(""),
+                failed.sql,
+            ));
+        }
+    }
+    eprintln!(
+        "uvg: applied {} statement(s) across {} file(s) to {}",
+        total_applied,
+        paths.len(),
+        target_label,
+    );
     Ok(())
 }
 

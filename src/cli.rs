@@ -28,8 +28,11 @@ pub struct Cli {
     #[arg(long)]
     pub split_tables: bool,
 
-    /// Execute DDL on the target database (requires target URL). Reserved for future use.
-    #[arg(long, hide = true)]
+    /// Execute generated DDL against the target database after rendering it.
+    /// Requires a target URL. Combines naturally with `--out-dir`: the
+    /// per-table files are written first, then applied in manifest order.
+    /// Exits non-zero on the first failed statement.
+    #[arg(long)]
     pub apply: bool,
 
     /// Tables to process (comma-delimited)
