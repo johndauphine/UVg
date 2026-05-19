@@ -501,6 +501,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_progress_emits_per_statement_lines_with_on() {
+        // --progress=on must emit one `[i/total] <preview>  <ms>ms`
+        // line per executed statement plus a class-breakdown summary.
+        let dir = tmpdir("apply-progress-on");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT NOT NULL);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&[
+            "--generator", "ddl", "--apply", "--progress", "on",
+            &src_url, &tgt_url,
+        ]);
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // At least one per-statement line.
+        let stmt_lines: Vec<_> = stderr.lines().filter(|l| l.starts_with('[')).collect();
+        assert!(
+            stmt_lines.len() >= 2,
+            "expected ≥2 per-statement progress lines, got {}: {stderr}",
+            stmt_lines.len(),
+        );
+        // Each per-statement line carries `[i/total]` and `ms`.
+        for line in &stmt_lines {
+            assert!(line.contains('/'), "missing /: {line}");
+            assert!(line.contains("ms"), "missing ms: {line}");
+        }
+        // Final summary line with class breakdown.
+        assert!(
+            stderr.contains("Applied") && stderr.contains("tables"),
+            "missing class-breakdown summary: {stderr}",
+        );
+        // Progress is on stderr, not stdout.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.lines().any(|l| l.starts_with('[')),
+            "progress leaked into stdout: {stdout}",
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_progress_off_is_silent() {
+        // --progress=off must suppress per-statement lines and the
+        // class-breakdown summary, while keeping the standard
+        // "uvg: applied N statement(s)..." one-liner.
+        let dir = tmpdir("apply-progress-off");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&[
+            "--generator", "ddl", "--apply", "--progress", "off",
+            &src_url, &tgt_url,
+        ]);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            !stderr.lines().any(|l| l.starts_with('[')),
+            "per-statement line leaked with --progress=off: {stderr}",
+        );
+        assert!(
+            !stderr.contains("Applied 1 statement(s) in"),
+            "class-breakdown summary leaked with --progress=off: {stderr}",
+        );
+        // Standard apply-summary still present.
+        assert!(stderr.contains("uvg: applied 1"), "missing apply summary: {stderr}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // No E2E for the failed-statement progress path: forcing uvg to
+    // emit a statement that fails-on-apply requires either custom
+    // injection beyond the public CLI's surface (the diff engine
+    // skips emit when source and target match) or a race-prone
+    // "pre-create-after-introspection" trick. The FAIL suffix and
+    // record-skipping-on-failure contracts are covered by unit tests
+    // in `src/apply_progress.rs` (`stats_record_skips_failed_statements`).
+
+    #[tokio::test]
+    async fn test_apply_progress_auto_is_silent_when_stderr_redirected() {
+        // Default --progress=auto consults stderr.is_terminal(); the
+        // subprocess we spawn has a piped stderr (not a TTY), so auto
+        // should resolve to off. Same assertion as --progress=off.
+        let dir = tmpdir("apply-progress-auto");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(&target, "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;").await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.lines().any(|l| l.starts_with('[')),
+            "auto should suppress when stderr isn't a TTY: {stderr}",
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn test_apply_requires_target_url() {
         // --apply without a target URL must exit non-zero with a helpful message.
         let dir = tmpdir("apply-no-target");

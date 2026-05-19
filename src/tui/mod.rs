@@ -845,7 +845,10 @@ async fn apply_ddl(app: &mut App) -> Result<Vec<db::StmtResult>> {
     let target_url = app.target_url.trim().to_string();
     let config = make_cli(&target_url, app.trust_cert).parse_connection()?;
     let sql = collect_apply_sql(&app.nodes);
-    db::execute_ddl(&config, &sql).await
+    // TUI renders its own per-statement status from the returned
+    // Vec<StmtResult>; the per-statement progress reporter is for the
+    // headless --apply path only (see apply_progress::print_progress).
+    db::execute_ddl(&config, &sql, |_, _, _| {}).await
 }
 
 fn make_cli(url: &str, trust_cert: bool) -> Cli {
@@ -856,6 +859,7 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
         target_dialect: None,
         split_tables: false,
         apply: false,
+        progress: crate::apply_progress::ProgressMode::Auto,
         tables: None,
         exclude_tables: None,
         schemas: None,

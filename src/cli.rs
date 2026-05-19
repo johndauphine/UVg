@@ -35,6 +35,11 @@ pub struct Cli {
     #[arg(long)]
     pub apply: bool,
 
+    /// Per-statement progress reporting on `--apply`. Default `auto`
+    /// emits when stderr is a terminal and stays silent when redirected.
+    #[arg(long, value_enum, default_value_t = crate::apply_progress::ProgressMode::Auto)]
+    pub progress: crate::apply_progress::ProgressMode,
+
     /// Tables to process (comma-delimited). Each item is a glob pattern
     /// (`*`, `?`, `[abc]`); bare names with no metacharacters match
     /// exactly. Default: all tables.
@@ -243,6 +248,7 @@ impl Cli {
                 target_dialect: None,
                 split_tables: false,
                 apply: false,
+                progress: crate::apply_progress::ProgressMode::Auto,
                 tables: None,
                 exclude_tables: None,
                 schemas: None,
@@ -282,6 +288,7 @@ impl Cli {
             target_dialect: None,
             split_tables: false,
             apply: false,
+            progress: crate::apply_progress::ProgressMode::Auto,
             tables: None,
             exclude_tables: None,
             schemas: None,
@@ -427,6 +434,7 @@ mod tests {
             target_dialect: None,
             split_tables: false,
             apply: false,
+            progress: crate::apply_progress::ProgressMode::Auto,
             tables: None,
             exclude_tables: None,
             schemas: None,
