@@ -9,12 +9,13 @@ use crate::cli::GeneratorOptions;
 use crate::dialect::Dialect;
 use crate::error::UvgError;
 use crate::schema::{EnumInfo, IntrospectedSchema};
+use crate::table_filter::TableFilter;
 
 /// Introspect a PostgreSQL database and return the full schema metadata.
 pub async fn introspect(
     pool: &PgPool,
     schemas: &[String],
-    table_filter: &[String],
+    table_filter: &TableFilter,
     noviews: bool,
     _options: &GeneratorOptions,
 ) -> Result<IntrospectedSchema, UvgError> {
@@ -24,10 +25,7 @@ pub async fn introspect(
     for schema in schemas {
         let mut schema_tables = tables::query_tables(pool, schema, noviews).await?;
 
-        // Apply table filter if specified
-        if !table_filter.is_empty() {
-            schema_tables.retain(|t| table_filter.contains(&t.name));
-        }
+        schema_tables.retain(|t| table_filter.matches(&t.name));
 
         // Populate columns, constraints, and indexes for each table
         for table in &mut schema_tables {

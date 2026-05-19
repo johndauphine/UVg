@@ -8,6 +8,7 @@ mod introspect;
 mod naming;
 mod output;
 mod schema;
+mod table_filter;
 #[cfg(test)]
 mod testutil;
 mod tui;
@@ -47,7 +48,7 @@ async fn main() -> Result<()> {
     } else {
         cli.schema_list_or(dialect.default_schema())
     };
-    let table_filter = cli.table_list();
+    let table_filter = cli.table_filter()?;
     let options = cli.generator_options();
 
     tracing::debug!("Connecting to database...");

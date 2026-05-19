@@ -25,4 +25,11 @@ pub enum UvgError {
 
     #[error("--{0} is only valid with --generator ddl")]
     DdlOnlyOption(String),
+
+    #[error("Invalid {flag} pattern `{pattern}`: {reason}")]
+    InvalidTablePattern {
+        flag: &'static str,
+        pattern: String,
+        reason: String,
+    },
 }

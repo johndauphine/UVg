@@ -803,7 +803,14 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
     };
     let options = crate::cli::GeneratorOptions::default();
     let source_schema =
-        db::introspect_with_config(source_config, &source_schemas, &[], false, &options).await?;
+        db::introspect_with_config(
+            source_config,
+            &source_schemas,
+            &crate::table_filter::TableFilter::allow_all(),
+            false,
+            &options,
+        )
+        .await?;
 
     // Introspect target
     let target_schemas = if let Some(db) = target_config.database_name() {
@@ -816,7 +823,7 @@ async fn generate_ddl(app: &mut App) -> Result<Vec<Change>> {
         db::introspect_with_config(
             make_cli(&target_url, app.trust_cert).parse_connection()?,
             &target_schemas,
-            &[],
+            &crate::table_filter::TableFilter::allow_all(),
             false,
             &options,
         )
@@ -850,6 +857,7 @@ fn make_cli(url: &str, trust_cert: bool) -> Cli {
         split_tables: false,
         apply: false,
         tables: None,
+        exclude_tables: None,
         schemas: None,
         noviews: false,
         options: None,

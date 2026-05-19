@@ -11,6 +11,7 @@ use crate::cli::GeneratorOptions;
 use crate::dialect::Dialect;
 use crate::error::UvgError;
 use crate::schema::IntrospectedSchema;
+use crate::table_filter::TableFilter;
 
 /// Establish a connection to a MSSQL server.
 pub async fn connect(
@@ -45,7 +46,7 @@ pub async fn connect(
 pub async fn introspect(
     client: &mut Client<Compat<TcpStream>>,
     schemas: &[String],
-    table_filter: &[String],
+    table_filter: &TableFilter,
     noviews: bool,
     _options: &GeneratorOptions,
 ) -> Result<IntrospectedSchema, UvgError> {
@@ -54,9 +55,7 @@ pub async fn introspect(
     for schema in schemas {
         let mut schema_tables = tables::query_tables(client, schema, noviews).await?;
 
-        if !table_filter.is_empty() {
-            schema_tables.retain(|t| table_filter.contains(&t.name));
-        }
+        schema_tables.retain(|t| table_filter.matches(&t.name));
 
         for table in &mut schema_tables {
             table.columns = columns::query_columns(client, &table.schema, &table.name).await?;

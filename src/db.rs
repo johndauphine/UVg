@@ -3,12 +3,13 @@ use anyhow::Result;
 use crate::cli::{ConnectionConfig, GeneratorOptions};
 use crate::introspect;
 use crate::schema::IntrospectedSchema;
+use crate::table_filter::TableFilter;
 
 /// Introspect a database given a ConnectionConfig.
 pub(crate) async fn introspect_with_config(
     config: ConnectionConfig,
     schemas: &[String],
-    table_filter: &[String],
+    table_filter: &TableFilter,
     noviews: bool,
     options: &GeneratorOptions,
 ) -> Result<IntrospectedSchema> {

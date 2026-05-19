@@ -35,9 +35,16 @@ pub struct Cli {
     #[arg(long)]
     pub apply: bool,
 
-    /// Tables to process (comma-delimited)
+    /// Tables to process (comma-delimited). Each item is a glob pattern
+    /// (`*`, `?`, `[abc]`); bare names with no metacharacters match
+    /// exactly. Default: all tables.
     #[arg(long)]
     pub tables: Option<String>,
+
+    /// Tables to exclude (comma-delimited), evaluated after `--tables`.
+    /// Same glob syntax as `--tables`.
+    #[arg(long)]
+    pub exclude_tables: Option<String>,
 
     /// Schemas to load (comma-delimited)
     #[arg(long)]
@@ -144,6 +151,16 @@ impl ConnectionConfig {
     }
 }
 
+/// Split a comma-delimited CLI value, trimming whitespace and dropping
+/// empty entries. `None` / empty string produce an empty vec.
+fn split_csv(raw: Option<&str>) -> Vec<String> {
+    let Some(s) = raw else { return Vec::new() };
+    s.split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 /// Ensure a MySQL URL includes `charset=utf8mb4` so that `information_schema`
 /// returns proper VARCHAR columns instead of VARBINARY.
 fn ensure_mysql_charset(url: &str) -> String {
@@ -161,11 +178,21 @@ fn ensure_mysql_charset(url: &str) -> String {
 
 impl Cli {
     /// Parse the comma-delimited --tables flag into a Vec of table names.
+    /// Empty / missing flag → empty vec. Used by `table_filter()`.
     pub fn table_list(&self) -> Vec<String> {
-        self.tables
-            .as_deref()
-            .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
-            .unwrap_or_default()
+        split_csv(self.tables.as_deref())
+    }
+
+    /// Parse the comma-delimited --exclude-tables flag.
+    pub fn exclude_table_list(&self) -> Vec<String> {
+        split_csv(self.exclude_tables.as_deref())
+    }
+
+    /// Build a `TableFilter` from `--tables` and `--exclude-tables`.
+    /// Validates every glob pattern up front so bad input surfaces
+    /// before any DB connection is opened.
+    pub fn table_filter(&self) -> Result<crate::table_filter::TableFilter, crate::error::UvgError> {
+        crate::table_filter::TableFilter::new(&self.table_list(), &self.exclude_table_list())
     }
 
     /// Parse the comma-delimited --schemas flag, falling back to the given default.
@@ -215,6 +242,7 @@ impl Cli {
                 split_tables: false,
                 apply: false,
                 tables: None,
+                exclude_tables: None,
                 schemas: None,
                 noviews: false,
                 options: None,
@@ -253,6 +281,7 @@ impl Cli {
             split_tables: false,
             apply: false,
             tables: None,
+            exclude_tables: None,
             schemas: None,
             noviews: false,
             options: None,
@@ -397,6 +426,7 @@ mod tests {
             split_tables: false,
             apply: false,
             tables: None,
+            exclude_tables: None,
             schemas: None,
             noviews: false,
             options: None,
