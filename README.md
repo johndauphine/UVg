@@ -345,6 +345,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
+For a local advisory view of Rust module size and test layout:
+
+```bash
+./scripts/module_size_report.py
+```
+
+This report is not a CI gate by default. It distinguishes approximate
+production lines from inline `#[cfg(test)]` lines and dedicated test files; see
+[`docs/module-size-report.md`](docs/module-size-report.md) for the guideline.
+
 CI also runs dependency, advisory, license, and source checks with
 `cargo-deny`. To run the same gate locally:
 
