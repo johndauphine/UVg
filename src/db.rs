@@ -399,31 +399,14 @@ where
                 .max_connections(1)
                 .connect(url)
                 .await?;
-            for (i, stmt) in statements.iter().enumerate() {
-                let result = run_with_retry(max_retries, |_attempt| {
-                    let pool = &pool;
-                    let stmt = stmt.as_str();
-                    async move {
-                        sqlx::query(stmt)
-                            .execute(pool)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| (e.to_string(), is_retryable_sqlx_pg_error(&e)))
-                    }
-                })
-                .await;
-                let result = StmtResult {
-                    sql: stmt.to_string(),
-                    error: result.error,
-                    duration: result.duration,
-                };
-                on_statement(&result, i + 1, total);
-                let failed = result.error.is_some();
-                results.push(result);
-                if failed {
-                    break;
-                }
-            }
+            results = execute_sqlx_ddl_statements(
+                &pool,
+                &statements,
+                max_retries,
+                &mut on_statement,
+                is_retryable_sqlx_pg_error,
+            )
+            .await;
             pool.close().await;
         }
         ConnectionConfig::Mysql(url) => {
@@ -431,31 +414,14 @@ where
                 .max_connections(1)
                 .connect(url)
                 .await?;
-            for (i, stmt) in statements.iter().enumerate() {
-                let result = run_with_retry(max_retries, |_attempt| {
-                    let pool = &pool;
-                    let stmt = stmt.as_str();
-                    async move {
-                        sqlx::query(stmt)
-                            .execute(pool)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| (e.to_string(), is_retryable_sqlx_mysql_error(&e)))
-                    }
-                })
-                .await;
-                let result = StmtResult {
-                    sql: stmt.to_string(),
-                    error: result.error,
-                    duration: result.duration,
-                };
-                on_statement(&result, i + 1, total);
-                let failed = result.error.is_some();
-                results.push(result);
-                if failed {
-                    break;
-                }
-            }
+            results = execute_sqlx_ddl_statements(
+                &pool,
+                &statements,
+                max_retries,
+                &mut on_statement,
+                is_retryable_sqlx_mysql_error,
+            )
+            .await;
             pool.close().await;
         }
         ConnectionConfig::Sqlite(url) => {
@@ -534,6 +500,50 @@ where
     }
 
     Ok(results)
+}
+
+async fn execute_sqlx_ddl_statements<DB, F>(
+    pool: &sqlx::Pool<DB>,
+    statements: &[String],
+    max_retries: u8,
+    on_statement: &mut F,
+    is_retryable: fn(&sqlx::Error) -> bool,
+) -> Vec<StmtResult>
+where
+    DB: sqlx::Database,
+    for<'c> &'c sqlx::Pool<DB>: sqlx::Executor<'c, Database = DB>,
+    for<'q> <DB as sqlx::Database>::Arguments<'q>: sqlx::IntoArguments<'q, DB>,
+    F: FnMut(&StmtResult, usize, usize),
+{
+    let total = statements.len();
+    let mut results = Vec::new();
+
+    for (i, stmt) in statements.iter().enumerate() {
+        let result = run_with_retry(max_retries, |_attempt| {
+            let stmt = stmt.as_str();
+            async move {
+                sqlx::query::<DB>(stmt)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| (e.to_string(), is_retryable(&e)))
+            }
+        })
+        .await;
+        let result = StmtResult {
+            sql: stmt.to_string(),
+            error: result.error,
+            duration: result.duration,
+        };
+        on_statement(&result, i + 1, total);
+        let failed = result.error.is_some();
+        results.push(result);
+        if failed {
+            break;
+        }
+    }
+
+    results
 }
 
 /// Internal: retry an async DDL action up to `max_retries` times when
