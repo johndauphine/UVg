@@ -1,9 +1,10 @@
 # Release Process
 
-UVg releases are cut from `master` by a maintainer. The version in
-`Cargo.toml`, the top-level package entry in `Cargo.lock`, the git tag, the
-GitHub Release, archive names, and crates.io package version must all use the
-same `X.Y.Z` value. Release tags use `vX.Y.Z`.
+UVg releases are cut from `master` by a maintainer. `Cargo.toml`, the
+top-level package entry in `Cargo.lock`, and crates.io use the bare `X.Y.Z`
+version. Git tags and GitHub Releases use `vX.Y.Z`, and workflow-generated
+archive names include that tag name, such as `uvg-vX.Y.Z-<target>.tar.gz`.
+All of these identifiers must point to the same release version.
 
 The current release automation is `.github/workflows/release.yml`. Pushing a
 `v*` tag builds the release binary for Linux x86_64, Linux aarch64, macOS

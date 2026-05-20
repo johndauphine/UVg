@@ -4,7 +4,8 @@ All notable user-facing changes to UVg are documented here.
 
 This project follows [Semantic Versioning](docs/release.md#versioning-policy).
 When cutting a release, move the relevant entries from `Unreleased` into a
-dated `vX.Y.Z` section and keep any empty headings out of the released section.
+dated `vX.Y.Z - YYYY-MM-DD` section and keep any empty headings out of the
+released section.
 
 Suggested headings:
 
