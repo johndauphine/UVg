@@ -219,6 +219,9 @@ def main(argv: list[str]) -> int:
     if not root.exists():
         print(f"error: root does not exist: {root}", file=sys.stderr)
         return 2
+    if not root.is_dir():
+        print(f"error: root is not a directory: {root}", file=sys.stderr)
+        return 2
     rows = [analyze_file(path, root) for path in iter_rust_files(root)]
     has_warnings = print_report(rows, args)
     if has_warnings and args.fail_on_warn:
