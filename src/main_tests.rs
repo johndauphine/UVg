@@ -1,4 +1,4 @@
-use super::redact_target_url;
+use super::{redact_target_url, validate_apply_blob};
 
 #[test]
 fn test_redact_target_url_strips_password() {
@@ -43,4 +43,48 @@ fn test_redact_target_url_preserves_query_and_path() {
         redact_target_url("mysql://u:p@host/db?charset=utf8mb4"),
         "mysql://***@host/db?charset=utf8mb4",
     );
+}
+
+#[test]
+fn validate_apply_blob_allows_executable_sql() {
+    validate_apply_blob("CREATE TABLE users(id INTEGER PRIMARY KEY);", "test").unwrap();
+}
+
+#[test]
+fn validate_apply_blob_allows_noop_sentinel() {
+    validate_apply_blob("-- No schema changes detected.", "test").unwrap();
+}
+
+#[test]
+fn validate_apply_blob_rejects_unappliable_marker() {
+    let err = validate_apply_blob(
+        "-- WARNING: SQLite does not support ALTER COLUMN. Table recreation required.\n\
+         -- ALTER TABLE users ALTER COLUMN email TYPE TEXT;",
+        "test",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("refusing to apply"));
+    assert!(err.contains("ALTER COLUMN"));
+}
+
+#[test]
+fn validate_apply_blob_rejects_mixed_marker_and_sql() {
+    let err = validate_apply_blob(
+        "ALTER TABLE users ADD COLUMN phone TEXT;\n\
+         -- WARNING: SQLite does not support ALTER COLUMN. Table recreation required.",
+        "test",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("refusing to apply"));
+    assert!(err.contains("SQLite does not support ALTER COLUMN"));
+}
+
+#[test]
+fn validate_apply_blob_rejects_comment_only_diff() {
+    let err = validate_apply_blob("-- manual follow-up required", "test")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("non-executable text"));
 }

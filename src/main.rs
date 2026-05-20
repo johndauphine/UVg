@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
         return tui::run(cli).await;
     }
 
+    validate_apply_cli(&cli)?;
+
     let table_filter = cli.table_filter()?;
     let options = cli.generator_options();
     let source_input = cli
@@ -300,6 +302,46 @@ fn schemas_for_config(cli: &Cli, config: &ConnectionConfig) -> Vec<String> {
     }
 }
 
+fn validate_apply_cli(cli: &Cli) -> Result<()> {
+    if !cli.apply {
+        return Ok(());
+    }
+    if cli.generator != "ddl" {
+        return Err(anyhow::anyhow!(
+            "--apply only works with --generator ddl (current: {})",
+            cli.generator,
+        ));
+    }
+    let Some(target_url) = cli.target_url.as_deref() else {
+        return Err(anyhow::anyhow!("--apply requires a target database URL"));
+    };
+    if is_snapshot_input(target_url) {
+        return Err(anyhow::anyhow!(
+            "--apply requires a live target database URL, not a snapshot"
+        ));
+    }
+    if cli.split_tables {
+        return Err(anyhow::anyhow!(
+            "--apply with --split-tables is not supported (use --out-dir for per-table apply)"
+        ));
+    }
+    if let Some(target_dialect) = cli.target_dialect.as_deref() {
+        let explicit = target_dialect
+            .parse::<crate::dialect::Dialect>()
+            .map_err(error::UvgError::InvalidDialect)?;
+        let url_dialect = cli.parse_target_connection(target_url)?.dialect();
+        if explicit != url_dialect {
+            return Err(anyhow::anyhow!(
+                "--apply: --target-dialect ({}) does not match the dialect inferred from the target URL ({}). \
+                 Drop --target-dialect, or change the URL scheme to match.",
+                explicit,
+                url_dialect,
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn classify_or_warn(
     cli: &Cli,
     changes: Vec<crate::output::Change>,
@@ -396,6 +438,39 @@ async fn run_parse_check(config: &ConnectionConfig, content: &str) -> Result<()>
     Err(anyhow::anyhow!(msg))
 }
 
+const UNAPPLIABLE_MARKERS: &[&str] = &[
+    "-- WARNING: SQLite does not support ALTER COLUMN",
+    "-- NOTE: MSSQL requires dropping the named default constraint",
+    "-- DROPPED CHECK ",
+];
+
+fn validate_apply_blob(sql: &str, source_label: &str) -> Result<()> {
+    if let Some(marker) = UNAPPLIABLE_MARKERS
+        .iter()
+        .find(|marker| sql.contains(*marker))
+    {
+        return Err(anyhow::anyhow!(
+            "refusing to apply ({source_label}): contains an instruction uvg cannot execute on its own:\n  {marker}\n\
+             Inspect the full diff with `--outfile` or `--out-dir` and apply the actionable parts \
+             manually so the target doesn't end up partially migrated."
+        ));
+    }
+
+    let statements = db::split_statements(sql);
+    if statements.is_empty() {
+        let trimmed = sql.trim();
+        let is_noop_sentinel =
+            trimmed.is_empty() || trimmed.starts_with("-- No schema changes detected");
+        if !is_noop_sentinel {
+            return Err(anyhow::anyhow!(
+                "refusing to apply ({source_label}): produced changes but they're all non-executable text. \
+                 Inspect with `--outfile` or `--out-dir` and apply the actionable parts by hand."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Apply a freshly-rendered diff (single SQL blob) against `config`.
 /// Empty diffs report "no schema changes" and succeed; first failed
 /// statement bubbles up as a non-zero exit. `target_url` is redacted
@@ -410,6 +485,7 @@ async fn apply_inline(
     max_retries: u8,
     parse_check: bool,
 ) -> Result<()> {
+    validate_apply_blob(content, "inline ddl")?;
     if parse_check {
         run_parse_check(config, content).await?;
     }
@@ -462,6 +538,14 @@ async fn apply_manifest(
     parse_check: bool,
 ) -> Result<()> {
     let paths = apply_order(manifest, out_dir);
+    let contents = paths
+        .iter()
+        .map(|path| fs::read_to_string(path).map(|content| (path.clone(), content)))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    for (path, content) in &contents {
+        validate_apply_blob(content, &path.display().to_string())?;
+    }
+
     let mut total_applied = 0usize;
     let mut stats = apply_progress::ApplyStats::new();
     if parse_check {
@@ -469,14 +553,17 @@ async fn apply_manifest(
         // batch in one pass. Per-statement parse errors carry the SQL
         // text so the user can still locate the offending statement
         // even though the file boundary is lost in the error list.
-        let combined = paths
+        let combined = contents
             .iter()
-            .map(|p| fs::read_to_string(p).map(|s| s + "\n"))
-            .collect::<std::io::Result<String>>()?;
+            .map(|(_, content)| {
+                let mut content = content.clone();
+                content.push('\n');
+                content
+            })
+            .collect::<String>();
         run_parse_check(config, &combined).await?;
     }
-    for path in &paths {
-        let content = fs::read_to_string(path)?;
+    for (path, content) in &contents {
         let results = {
             let observer = |r: &db::StmtResult, i: usize, total: usize| {
                 if progress_enabled {
@@ -484,7 +571,7 @@ async fn apply_manifest(
                 }
                 stats.record(r);
             };
-            db::execute_ddl(config, &content, max_retries, observer).await?
+            db::execute_ddl(config, content, max_retries, observer).await?
         };
         let applied_here = results.iter().take_while(|r| r.error.is_none()).count();
         total_applied += applied_here;

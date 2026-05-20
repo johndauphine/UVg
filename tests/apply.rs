@@ -25,6 +25,38 @@ mod tests {
         rows.into_iter().map(|(n,)| n).collect()
     }
 
+    async fn column_names(db_path: &Path, table: &str) -> Vec<String> {
+        let url = format!("sqlite://{}?mode=ro", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("sqlite connect");
+        let sql = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid");
+        let rows: Vec<(String,)> = sqlx::query_as(&sql)
+            .fetch_all(&pool)
+            .await
+            .expect("column query");
+        pool.close().await;
+        rows.into_iter().map(|(name,)| name).collect()
+    }
+
+    async fn column_types(db_path: &Path, table: &str) -> Vec<(String, String)> {
+        let url = format!("sqlite://{}?mode=ro", db_path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("sqlite connect");
+        let sql = format!("SELECT name, type FROM pragma_table_info('{table}') ORDER BY cid");
+        let rows = sqlx::query_as(&sql)
+            .fetch_all(&pool)
+            .await
+            .expect("column type query");
+        pool.close().await;
+        rows
+    }
+
     #[tokio::test]
     async fn test_apply_inline_creates_target_tables() {
         // --apply (no --out-dir) should generate the diff and execute it
@@ -429,6 +461,248 @@ mod tests {
         assert!(
             stderr.contains("target database URL"),
             "expected helpful error, got: {stderr}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_rejected_for_non_ddl_generator() {
+        let dir = tmpdir("apply-wrong-generator");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&["--apply", &src_url, &tgt_url]);
+        assert!(!out.status.success(), "must exit non-zero");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--apply only works with --generator ddl"),
+            "expected generator-mismatch error, got: {stderr}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_rejects_target_dialect_url_mismatch() {
+        let dir = tmpdir("apply-dialect-mismatch");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--apply",
+            "--target-dialect",
+            "mysql",
+            &src_url,
+            &tgt_url,
+        ]);
+        assert!(!out.status.success(), "must exit non-zero");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--target-dialect")
+                && stderr.contains("does not match")
+                && stderr.contains("target URL"),
+            "expected dialect-mismatch error, got: {stderr}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_rejects_split_tables_combo() {
+        let dir = tmpdir("apply-split-combo");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(&source, "CREATE TABLE users(id INTEGER PRIMARY KEY);").await;
+        exec_sql(
+            &target,
+            "CREATE TABLE _bootstrap(id INTEGER); DROP TABLE _bootstrap;",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--apply",
+            "--split-tables",
+            &src_url,
+            &tgt_url,
+        ]);
+        assert!(!out.status.success(), "combo must error");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--apply with --split-tables") && stderr.contains("--out-dir"),
+            "expected guidance pointing at --out-dir, got: {stderr}"
+        );
+        assert!(
+            !list_tables(&target).await.contains(&"users".to_string()),
+            "target must not be mutated by the rejected combo"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_preflight_runs_before_source_connection() {
+        let out = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--apply",
+            "postgres://nobody:nopass@unreachable.invalid:5432/none",
+        ]);
+        assert!(!out.status.success(), "must exit non-zero");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--apply requires a target database URL"),
+            "expected target-URL validation error before source connection, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("unreachable.invalid"),
+            "preflight must run before source connection attempt, got: {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_rejects_comment_only_diff() {
+        let dir = tmpdir("apply-comment-only");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT);",
+        )
+        .await;
+        exec_sql(
+            &target,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email INTEGER);",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(
+            !out.status.success(),
+            "must exit non-zero on comment-only diff"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("refusing to apply")
+                && (stderr.contains("--outfile") || stderr.contains("--out-dir")),
+            "expected refusal + inspection hint, got: {stderr}"
+        );
+        let email = column_types(&target, "users")
+            .await
+            .into_iter()
+            .find(|(name, _)| name == "email")
+            .expect("email column");
+        assert_eq!(email.1, "INTEGER", "target schema must be untouched");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_rejects_mixed_diff_with_unappliable_warning() {
+        let dir = tmpdir("apply-mixed-warning");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT, phone TEXT);",
+        )
+        .await;
+        exec_sql(
+            &target,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, email INTEGER);",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+
+        let out = run_uvg(&["--generator", "ddl", "--apply", &src_url, &tgt_url]);
+        assert!(
+            !out.status.success(),
+            "mixed diff must error before applying"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("refusing to apply") && stderr.contains("ALTER COLUMN"),
+            "expected marker-specific error, got: {stderr}"
+        );
+        let names = column_names(&target, "users").await;
+        assert!(
+            !names.contains(&"phone".to_string()),
+            "ADD COLUMN must not have run: {names:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_apply_out_dir_preflights_all_files_before_executing() {
+        let dir = tmpdir("apply-outdir-preflight");
+        let source = dir.join("source.db");
+        let target = dir.join("target.db");
+        let migrations = dir.join("migrations");
+        exec_sql(
+            &source,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, phone TEXT);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        exec_sql(
+            &target,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY);
+             CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER, body INTEGER,
+                                FOREIGN KEY(user_id) REFERENCES users(id));",
+        )
+        .await;
+        let src_url = format!("sqlite:///{}", source.display());
+        let tgt_url = format!("sqlite:///{}", target.display());
+        let mig_str = migrations.display().to_string();
+
+        let out = run_uvg(&[
+            "--generator",
+            "ddl",
+            "--apply",
+            "--out-dir",
+            &mig_str,
+            "--name",
+            "mixed",
+            &src_url,
+            &tgt_url,
+        ]);
+        assert!(!out.status.success(), "preflight must reject the run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("refusing to apply") && stderr.contains("ALTER COLUMN"),
+            "expected marker-specific error, got: {stderr}"
+        );
+        let names = column_names(&target, "users").await;
+        assert!(
+            !names.contains(&"phone".to_string()),
+            "users.phone must not have been added: {names:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
