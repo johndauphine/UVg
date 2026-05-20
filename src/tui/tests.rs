@@ -1,4 +1,11 @@
-use super::*;
+use crossterm::event::KeyCode;
+
+use super::actions::{collect_apply_sql, count_statements};
+use super::app::{
+    group_changes, node_detail_line_count, node_detail_text, App, AppState, TreeNode,
+};
+use super::events::handle_view_keys;
+use crate::output::Change;
 
 fn ch(schema: &str, table: Option<&str>, sql: &str) -> Change {
     Change {
@@ -17,22 +24,25 @@ fn node(name: &str) -> TreeNode {
 }
 
 fn view_app(nodes: Vec<TreeNode>) -> App {
-    App {
+    let mut app = App {
         state: AppState::ViewDdl,
         source_url: String::new(),
         target_url: String::new(),
         focused_field: 0,
         cursor_pos: [0, 0],
-        nodes,
+        nodes: Vec::new(),
         selected_idx: 0,
         scroll_offset: 0,
         empty_diff: false,
+        executable_statement_count: 0,
         status_msg: String::new(),
         error_msg: None,
         success_msg: None,
         apply_results: Vec::new(),
         trust_cert: false,
-    }
+    };
+    app.set_nodes(nodes);
+    app
 }
 
 #[test]
@@ -162,6 +172,54 @@ fn test_collect_apply_sql_no_checked_returns_empty() {
         checked: false,
     }];
     assert_eq!(collect_apply_sql(&nodes), "");
+}
+
+#[test]
+fn test_node_detail_line_count_matches_render_text() {
+    let node = TreeNode {
+        name: "users".into(),
+        changes: vec![
+            ch("", Some("users"), "CREATE TABLE users (\n  id int\n);"),
+            ch("", Some("users"), "CREATE INDEX idx_users_id ON users(id);"),
+        ],
+        checked: true,
+    };
+
+    assert_eq!(
+        node_detail_line_count(&node) as usize,
+        node_detail_text(&node).lines().count()
+    );
+}
+
+#[test]
+fn test_cached_statement_count_updates_when_nodes_toggle() {
+    let mut app = view_app(vec![
+        TreeNode {
+            name: "users".into(),
+            changes: vec![ch(
+                "",
+                Some("users"),
+                "ALTER TABLE users ADD COLUMN age int;",
+            )],
+            checked: true,
+        },
+        TreeNode {
+            name: "notes".into(),
+            changes: vec![ch("", Some("notes"), "-- comment only")],
+            checked: true,
+        },
+    ]);
+
+    assert_eq!(app.executable_statement_count(), 1);
+
+    handle_view_keys(&mut app, KeyCode::Char(' '));
+    assert_eq!(app.executable_statement_count(), 0);
+
+    handle_view_keys(&mut app, KeyCode::Char(' '));
+    assert_eq!(app.executable_statement_count(), 1);
+
+    handle_view_keys(&mut app, KeyCode::Char('A'));
+    assert_eq!(app.executable_statement_count(), 0);
 }
 
 #[test]
