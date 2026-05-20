@@ -11,6 +11,7 @@ mod migrations;
 mod naming;
 mod output;
 mod profile;
+mod redaction;
 mod risk_classify;
 mod schema;
 mod snapshot;
@@ -340,22 +341,14 @@ fn write_split_output(files: &[(String, String)], outfile: &Option<String>) -> a
     Ok(())
 }
 
-/// Strip userinfo from a connection URL before it lands in a stderr
-/// message. Database URLs commonly carry credentials in the
-/// `scheme://user:pass@host/db` form; emitting them verbatim leaks
-/// secrets into CI logs and terminal scrollback. Best-effort: a URL
-/// the `url` crate can't parse (e.g. `sqlite:relative/path`) is
-/// returned unchanged, since those forms don't carry credentials.
+/// Strip credentials from a connection URL before it lands in a stderr
+/// message. Database URLs commonly carry credentials in userinfo or
+/// query parameters; emitting them verbatim leaks secrets into CI logs
+/// and terminal scrollback. Best-effort: a URL the `url` crate can't
+/// parse (e.g. `sqlite:relative/path`) is returned unchanged, since
+/// those forms don't carry network credentials.
 fn redact_target_url(raw: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(raw) else {
-        return raw.to_string();
-    };
-    if parsed.username().is_empty() && parsed.password().is_none() {
-        return raw.to_string();
-    }
-    let _ = parsed.set_username("***");
-    let _ = parsed.set_password(None);
-    parsed.into()
+    redaction::redact_connection_url(raw)
 }
 
 /// Run the per-dialect parse-check probe. Aborts with all collected

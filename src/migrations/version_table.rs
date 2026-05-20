@@ -32,15 +32,7 @@ pub(super) fn confirm_stamp(target_url: &str, revision: &str) -> Result<bool> {
 }
 
 pub(super) fn redact_url(raw: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(raw) else {
-        return raw.to_string();
-    };
-    if parsed.username().is_empty() && parsed.password().is_none() {
-        return raw.to_string();
-    }
-    let _ = parsed.set_username("***");
-    let _ = parsed.set_password(None);
-    parsed.into()
+    crate::redaction::redact_connection_url(raw)
 }
 
 pub(super) async fn ensure_version_table(config: &ConnectionConfig) -> Result<()> {

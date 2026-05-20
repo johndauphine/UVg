@@ -46,6 +46,11 @@ sqlite:///path/to/db.sqlite
 mssql://user:pass@host/db
 ```
 
+For production use, read [Operations and Security](docs/operations-security.md)
+before connecting to protected databases. It covers credential redaction, TLS
+settings, required privileges, logs/errors, generated artifacts, and safe apply
+workflows.
+
 ### Generate SQLAlchemy models
 
 ```bash
@@ -222,7 +227,7 @@ When the diff spans multiple tables, the TUI shows a left tree pane (one entry p
 | `--out-dir <DIR>` | Per-table migration layout for `--generator ddl` with a target URL. No-op runs write nothing — see [above](#per-table-migration-layout---out-dir) |
 | `--name <SLUG>` | Filename suffix used inside `--out-dir` (default: `<source>_to_<target>`) |
 | `--interactive`, `-i` | Launch interactive TUI for DDL diff and apply |
-| `--trust-cert` | Trust the server certificate (MSSQL only) |
+| `--trust-cert` | Trust the server certificate (MSSQL only; see [Operations and Security](docs/operations-security.md#tls-and-certificate-behavior)) |
 
 ## Output Examples
 
