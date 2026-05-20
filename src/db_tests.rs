@@ -292,3 +292,41 @@ async fn retry_helper_with_zero_retries_runs_once() {
     );
     assert!(outcome.error.is_some());
 }
+
+#[tokio::test]
+async fn sqlx_ddl_helper_invokes_callbacks_and_stops_after_failure() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let statements = vec![
+        "CREATE TABLE a (id INT)".to_string(),
+        "CREATE TABLE a (id INT)".to_string(),
+        "CREATE TABLE b (id INT)".to_string(),
+    ];
+    let mut seen = Vec::new();
+
+    let results = execute_sqlx_ddl_statements(
+        &pool,
+        &statements,
+        0,
+        &mut |result, index, total| {
+            seen.push((index, total, result.sql.clone(), result.error.is_some()));
+        },
+        |_| false,
+    )
+    .await;
+    pool.close().await;
+
+    assert_eq!(results.len(), 2);
+    assert!(results[0].error.is_none());
+    assert!(results[1].error.is_some());
+    assert_eq!(
+        seen,
+        vec![
+            (1, 3, "CREATE TABLE a (id INT)".to_string(), false),
+            (2, 3, "CREATE TABLE a (id INT)".to_string(), true),
+        ]
+    );
+}
